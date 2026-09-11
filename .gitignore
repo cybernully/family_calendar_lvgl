@@ -13,3 +13,5 @@ include/app_local.h
 
 # Downloaded ESP-Hosted co-processor firmware (fetched from Espressif at build time)
 data/hosted/*.bin
+
+*.zip
