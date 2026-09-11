@@ -1,0 +1,18 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "PIO Clean",
+			"type": "shell",
+			"command": "platformio",
+			"args": [
+				"run",
+				"--target",
+				"clean",
+				"--environment",
+				"jc8012p4a1c"
+			],
+			"isBackground": false
+		}
+	]
+}
