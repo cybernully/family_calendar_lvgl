@@ -217,7 +217,14 @@ bool same_local_day(time_t left, time_t right) {
 
 float temperature_to_c(float value, const char *unit) {
     if (!unit || !unit[0]) return value;
-    if (unit[0] == 'F' || unit[0] == 'f') return (value - 32.0f) * 5.0f / 9.0f;
+
+    // Home Assistant normally reports Fahrenheit as "°F", so checking only
+    // unit[0] misses it because the first bytes are the UTF-8 degree symbol.
+    // Accept both plain "F" and strings such as "°F" / "fahrenheit".
+    if (strchr(unit, 'F') || strchr(unit, 'f')) {
+        return (value - 32.0f) * 5.0f / 9.0f;
+    }
+
     return value;
 }
 

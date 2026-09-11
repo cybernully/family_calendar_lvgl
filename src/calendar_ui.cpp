@@ -41,6 +41,7 @@ constexpr int DAY_GAP = 4;
 constexpr int DAY_W = (CAL_W - DAY_GAP * 6) / 7;
 constexpr int EVENT_CARD_H = 76;
 constexpr int EVENT_CARD_STEP = 80;
+constexpr int DAY_HEADER_H = 88;
 constexpr int MAX_VISIBLE_EVENTS_PER_DAY = 6;
 
 enum class Dashboard : uint8_t {
@@ -353,7 +354,7 @@ lv_obj_t *create_weather_icon(lv_obj_t *parent,
                               uint32_t primary,
                               uint32_t secondary) {
     if (!parent) return nullptr;
-    if (size < 16) size = 16;
+    if (size < 20) size = 20;
 
     lv_obj_t *icon = lv_obj_create(parent);
     if (!icon) return nullptr;
@@ -364,73 +365,107 @@ lv_obj_t *create_weather_icon(lv_obj_t *parent,
     lv_obj_remove_flag(icon, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_remove_flag(icon, LV_OBJ_FLAG_CLICKABLE);
 
-    const int sun_r = size / 6;
-    const int sun_d = sun_r * 2;
+    /*
+     * Condition-specific colors make the forecast readable at a glance.
+     * primary/secondary are retained for API compatibility and are used by
+     * the unknown-condition fallback.
+     */
+    const uint32_t sun = 0xF59E0B;
+    const uint32_t sun_bright = 0xFBBF24;
+    const uint32_t cloud = g_dark_mode ? 0xCBD5E1 : 0x94A3B8;
+    const uint32_t cloud_light = g_dark_mode ? 0xF1F5F9 : 0xCBD5E1;
+    const uint32_t cloud_dark = g_dark_mode ? 0x94A3B8 : 0x64748B;
+    const uint32_t rain = 0x3B82F6;
+    const uint32_t rain_light = 0x60A5FA;
+    const uint32_t lightning = 0xFACC15;
+    const uint32_t snow = 0x38BDF8;
+    const uint32_t fog = g_dark_mode ? 0xCBD5E1 : 0x94A3B8;
+
     const int cloud_h = size / 4;
     const int cloud_y = size / 2;
 
-    auto draw_cloud = [&](uint32_t color) {
-        icon_piece(icon, size / 6, cloud_y - 2, size * 2 / 3, cloud_h + 3, color, cloud_h / 2);
-        icon_piece(icon, size / 4, cloud_y - cloud_h / 2 - 1, cloud_h, cloud_h, color, cloud_h / 2);
-        icon_piece(icon, size / 2 - cloud_h / 3, cloud_y - cloud_h / 2 - 4,
-                   cloud_h + 2, cloud_h + 2, color, (cloud_h + 2) / 2);
+    auto draw_sun = [&](int cx, int cy, int radius) {
+        const int diameter = radius * 2;
+        icon_piece(icon, cx - radius, cy - radius, diameter, diameter, sun_bright, radius);
+
+        const int ray = size >= 48 ? 3 : 2;
+        const int ray_len = size / 7;
+        icon_piece(icon, cx - ray / 2, cy - radius - ray_len - 2, ray, ray_len, sun, 1);
+        icon_piece(icon, cx - ray / 2, cy + radius + 2, ray, ray_len, sun, 1);
+        icon_piece(icon, cx - radius - ray_len - 2, cy - ray / 2, ray_len, ray, sun, 1);
+        icon_piece(icon, cx + radius + 2, cy - ray / 2, ray_len, ray, sun, 1);
+    };
+
+    auto draw_cloud = [&](uint32_t base, uint32_t highlight) {
+        const int body_x = size / 7;
+        const int body_w = size * 5 / 7;
+        const int body_y = cloud_y;
+        icon_piece(icon, body_x, body_y, body_w, cloud_h + 3, base, cloud_h / 2);
+        icon_piece(icon, size / 4, body_y - cloud_h / 2, cloud_h + 2, cloud_h + 2,
+                   highlight, (cloud_h + 2) / 2);
+        icon_piece(icon, size / 2 - cloud_h / 3, body_y - cloud_h / 2 - 4,
+                   cloud_h + 5, cloud_h + 5, base, (cloud_h + 5) / 2);
+        icon_piece(icon, size / 2 + cloud_h / 3, body_y - cloud_h / 3,
+                   cloud_h, cloud_h, highlight, cloud_h / 2);
     };
 
     switch (condition) {
         case WeatherCondition::Clear:
-            icon_piece(icon, size / 2 - sun_r, size / 2 - sun_r, sun_d, sun_d, primary, sun_r);
-            icon_piece(icon, size / 2 - 1, size / 8, 2, size / 5, primary, 1);
-            icon_piece(icon, size / 2 - 1, size * 5 / 8, 2, size / 5, primary, 1);
-            icon_piece(icon, size / 8, size / 2 - 1, size / 5, 2, primary, 1);
-            icon_piece(icon, size * 5 / 8, size / 2 - 1, size / 5, 2, primary, 1);
+            draw_sun(size / 2, size / 2, size / 5);
             break;
 
         case WeatherCondition::PartlyCloudy:
-            icon_piece(icon, size / 4, size / 6, sun_d, sun_d, secondary, sun_r);
-            icon_piece(icon, size / 4 + sun_r - 1, size / 14, 2, size / 7, secondary, 1);
-            icon_piece(icon, size / 8, size / 6 + sun_r - 1, size / 8, 2, secondary, 1);
-            draw_cloud(primary);
+            draw_sun(size / 3, size / 3, size / 7);
+            draw_cloud(cloud, cloud_light);
             break;
 
         case WeatherCondition::Cloudy:
-            draw_cloud(primary);
-            icon_piece(icon, size / 3, cloud_y - cloud_h / 2 - 6, cloud_h, cloud_h, primary, cloud_h / 2);
+            icon_piece(icon, size / 8, size / 3, size / 2, cloud_h + 2,
+                       cloud_dark, cloud_h / 2);
+            icon_piece(icon, size / 5, size / 4, cloud_h + 2, cloud_h + 2,
+                       cloud_light, (cloud_h + 2) / 2);
+            draw_cloud(cloud, cloud_light);
             break;
 
         case WeatherCondition::Rain:
         case WeatherCondition::Showers:
-            draw_cloud(primary);
-            icon_piece(icon, size / 3, cloud_y + cloud_h + 2, 2, size / 5, secondary, 1);
-            icon_piece(icon, size / 2, cloud_y + cloud_h + 4, 2, size / 5, secondary, 1);
-            if (condition == WeatherCondition::Showers) {
-                icon_piece(icon, size / 4, cloud_y + cloud_h + 5, 2, size / 6, secondary, 1);
-            }
+            draw_cloud(cloud, cloud_light);
+            icon_piece(icon, size / 4, cloud_y + cloud_h + 3, 3, size / 5, rain, 1);
+            icon_piece(icon, size / 2, cloud_y + cloud_h + 5, 3, size / 5, rain_light, 1);
+            icon_piece(icon, size * 3 / 4 - 3, cloud_y + cloud_h + 3, 3, size / 5, rain, 1);
             break;
 
         case WeatherCondition::Thunderstorm:
-            draw_cloud(primary);
-            icon_piece(icon, size / 2 - 2, cloud_y + cloud_h + 2, size / 6, 3, secondary, 1);
-            icon_piece(icon, size / 2 + size / 12 - 2, cloud_y + cloud_h + 4, 3, size / 6, secondary, 1);
-            icon_piece(icon, size / 2 + size / 12 - 1, cloud_y + cloud_h + size / 6 + 2,
-                       size / 6, 3, secondary, 1);
+            draw_cloud(cloud_dark, cloud);
+            icon_piece(icon, size / 2 - 3, cloud_y + cloud_h + 1, size / 5, 4, lightning, 1);
+            icon_piece(icon, size / 2 + size / 10 - 3, cloud_y + cloud_h + 4, 4, size / 6,
+                       lightning, 1);
+            icon_piece(icon, size / 2 + size / 10 - 2,
+                       cloud_y + cloud_h + size / 6 + 2,
+                       size / 6, 4, lightning, 1);
             break;
 
         case WeatherCondition::Snow:
-            draw_cloud(primary);
-            icon_piece(icon, size / 3, cloud_y + cloud_h + 4, 3, 3, secondary, 2);
-            icon_piece(icon, size / 2, cloud_y + cloud_h + 6, 3, 3, secondary, 2);
-            icon_piece(icon, size * 2 / 3 - 4, cloud_y + cloud_h + 4, 3, 3, secondary, 2);
+            draw_cloud(cloud, cloud_light);
+            for (int i = 0; i < 3; ++i) {
+                const int x = size / 4 + i * size / 4;
+                const int y = cloud_y + cloud_h + 6 + ((i % 2) ? 4 : 0);
+                icon_piece(icon, x - 2, y, 5, 2, snow, 1);
+                icon_piece(icon, x, y - 2, 2, 5, snow, 1);
+            }
             break;
 
         case WeatherCondition::Fog:
-            draw_cloud(primary);
-            icon_piece(icon, size / 5, size * 3 / 4, size * 3 / 5, 2, secondary, 1);
-            icon_piece(icon, size / 4, size * 3 / 4 + 6, size / 2, 2, secondary, 1);
+            draw_cloud(cloud, cloud_light);
+            icon_piece(icon, size / 7, size * 3 / 4, size * 5 / 7, 2, fog, 1);
+            icon_piece(icon, size / 5, size * 3 / 4 + 6, size * 3 / 5, 2, fog, 1);
             break;
 
         case WeatherCondition::Unknown:
         default:
-            icon_piece(icon, size / 2 - sun_r, size / 2 - sun_r, sun_d, sun_d, primary, sun_r);
+            draw_sun(size / 2, size / 2, size / 6);
+            icon_piece(icon, size / 2 - 1, size / 2 - 1, 3, 3,
+                       primary ? primary : secondary, 1);
             break;
     }
 
@@ -814,7 +849,7 @@ void create_footer() {
 void add_event_card(lv_obj_t *column, const CalendarEvent *event, int slot) {
     lv_obj_t *card = lv_button_create(column);
     lv_obj_set_size(card, DAY_W - 12, EVENT_CARD_H);
-    lv_obj_set_pos(card, 6, 66 + slot * EVENT_CARD_STEP);
+    lv_obj_set_pos(card, 6, DAY_HEADER_H + slot * EVENT_CARD_STEP);
     style_box(card, CALENDAR_PEOPLE[event->person].color, 9, 0);
     lv_obj_set_style_bg_opa(card, LV_OPA_90, LV_PART_MAIN);
     lv_obj_set_style_pad_all(card, 7, LV_PART_MAIN);
@@ -876,21 +911,31 @@ void render_week() {
 
         lv_obj_set_style_bg_color(column, lv_color_hex(is_today ? theme().today : theme().panel), LV_PART_MAIN);
 
+        /*
+         * Treat the day/date/weather as one header instead of bolting a tiny
+         * weather glyph onto the corner.  This keeps the forecast readable
+         * without sacrificing any of the six event-card slots below it.
+         */
         lv_obj_t *day_name = label(column, calendar_day_name(day), &lv_font_montserrat_14,
-                                   is_today ? theme().accent : theme().muted);
-        lv_obj_align(day_name, LV_ALIGN_TOP_MID, 0, 8);
+                                   is_today ? theme().accent : theme().muted, DAY_W - 12);
+        if (day_name) {
+            lv_obj_set_style_text_align(day_name, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+            lv_obj_set_pos(day_name, 6, 5);
+        }
 
         char number[8];
         snprintf(number, sizeof(number), "%d", day_tm.tm_mday);
         lv_obj_t *day_number = label(column, number, &lv_font_montserrat_24,
                                      is_today ? theme().accent : theme().text);
-        lv_obj_align(day_number, LV_ALIGN_TOP_MID, 0, 32);
+        lv_obj_align(day_number, LV_ALIGN_TOP_MID, 0, 24);
 
         WeatherDayForecast day_weather = {};
         if (weather_service_get_day_forecast(day_time, day_weather) && day_weather.valid) {
+            constexpr int WEATHER_ROW_W = 100;
+            constexpr int WEATHER_ROW_H = 34;
             lv_obj_t *weather_row = lv_obj_create(column);
-            lv_obj_set_size(weather_row, 54, 18);
-            lv_obj_set_pos(weather_row, DAY_W - 58, 42);
+            lv_obj_set_size(weather_row, WEATHER_ROW_W, WEATHER_ROW_H);
+            lv_obj_align(weather_row, LV_ALIGN_TOP_MID, 0, 49);
             lv_obj_set_style_bg_opa(weather_row, LV_OPA_TRANSP, LV_PART_MAIN);
             lv_obj_set_style_border_width(weather_row, 0, LV_PART_MAIN);
             lv_obj_set_style_pad_all(weather_row, 0, LV_PART_MAIN);
@@ -899,17 +944,21 @@ void render_week() {
 
             lv_obj_t *icon = create_weather_icon(weather_row,
                                                  day_weather.condition,
-                                                 14,
-                                                 theme().muted,
+                                                 34,
+                                                 theme().text,
                                                  theme().accent);
-            set_pos_if(icon, 0, 2);
+            set_pos_if(icon, 0, 0);
 
             char temps[24];
             snprintf(temps, sizeof(temps), "%d/%d",
                      rounded_display_temp(day_weather.high_c),
                      rounded_display_temp(day_weather.low_c));
-            lv_obj_t *temp = label(weather_row, temps, &lv_font_montserrat_12, theme().muted, 36);
-            set_pos_if(temp, 16, 2);
+            lv_obj_t *temp = label(weather_row, temps, &lv_font_montserrat_14,
+                                   is_today ? theme().accent : theme().text, 62);
+            if (temp) {
+                lv_obj_set_style_text_align(temp, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+                lv_obj_set_pos(temp, 38, 8);
+            }
         }
 
         int slot = 0;
@@ -927,7 +976,7 @@ void render_week() {
 
         if (slot == 0) {
             lv_obj_t *empty = label(column, "No events", &lv_font_montserrat_12, theme().muted);
-            lv_obj_align(empty, LV_ALIGN_TOP_MID, 0, 94);
+            lv_obj_align(empty, LV_ALIGN_TOP_MID, 0, DAY_HEADER_H + 10);
         } else if (hidden > 0) {
             char more[24];
             snprintf(more, sizeof(more), "+%d more", hidden);
@@ -1131,34 +1180,34 @@ void create_calendar_dashboard() {
     style_box(side, theme().panel, 14, 1);
     lv_obj_set_style_pad_all(side, 14, LV_PART_MAIN);
 
+    // Keep the sidebar intentionally sparse: today's summary at the top,
+    // Home Assistant status below it, and the manual refresh action anchored
+    // to the bottom.  Avoid instructional copy here so the calendar itself
+    // remains the visual focus.
     lv_obj_t *today_title = label(side, "TODAY", &lv_font_montserrat_14, theme().muted);
     lv_obj_set_pos(today_title, 0, 0);
+
     g_summary_label = label(side, "Calendar starting...", &lv_font_montserrat_18, theme().text, 174);
     lv_label_set_long_mode(g_summary_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_pos(g_summary_label, 0, 30);
+    lv_obj_set_pos(g_summary_label, 0, 28);
 
     lv_obj_t *line = lv_obj_create(side);
     lv_obj_set_size(line, 174, 1);
-    lv_obj_set_pos(line, 0, 122);
+    lv_obj_set_pos(line, 0, 92);
     lv_obj_set_style_bg_color(line, lv_color_hex(theme().border), LV_PART_MAIN);
     lv_obj_set_style_border_width(line, 0, LV_PART_MAIN);
 
     lv_obj_t *integration = label(side, "HOME ASSISTANT", &lv_font_montserrat_14, theme().muted);
-    lv_obj_set_pos(integration, 0, 146);
+    lv_obj_set_pos(integration, 0, 116);
+
     g_status_label = label(side, "", &lv_font_montserrat_12, theme().muted, 174);
     lv_label_set_long_mode(g_status_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_height(g_status_label, 126);
-    lv_obj_set_pos(g_status_label, 0, 176);
+    lv_obj_set_height(g_status_label, 220);
+    lv_obj_set_pos(g_status_label, 0, 146);
 
     lv_obj_t *sync_side = button(side, "Refresh now", 174, 42, false, &lv_font_montserrat_14);
-    lv_obj_set_pos(sync_side, 0, 318);
+    lv_obj_align(sync_side, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_add_event_cb(sync_side, sync_now_cb, LV_EVENT_CLICKED, nullptr);
-
-    lv_obj_t *refresh_note = label(side, "Auto-refresh while visible: 5 min", &lv_font_montserrat_12, theme().muted, 190);
-    lv_obj_set_pos(refresh_note, 0, 370);
-
-    lv_obj_t *swipe_note = label(side, "Swipe week left/right", &lv_font_montserrat_12, theme().muted, 190);
-    lv_obj_set_pos(swipe_note, 0, 394);
 
     for (int day = 0; day < 7; ++day) {
         lv_obj_t *column = lv_obj_create(g_screen);
