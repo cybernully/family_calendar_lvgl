@@ -2,6 +2,13 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "app_config.h"
+
+struct AlarmActiveSensor {
+    char entity_id[96];
+    char name[80];
+    char device_class[24];
+};
 
 struct AlarmoSnapshot {
     char entity_id[96];
@@ -12,9 +19,12 @@ struct AlarmoSnapshot {
     char open_sensors[320];
     char last_triggered[40];
     char code_format[20];
+    AlarmActiveSensor active_sensors[HA_MAX_ACTIVE_ALARM_SENSORS];
     uint32_t supported_features;
     int delay_seconds;
     uint16_t open_sensor_count;
+    uint16_t active_sensor_count;
+    uint16_t active_sensor_total;
     bool valid;
 };
 

@@ -95,7 +95,7 @@
 #define HA_ACTIVE_TAB_CHORES_REFRESH_MS 60000UL     /* Chores: 1 min */
 #endif
 #ifndef HA_ACTIVE_TAB_ALARM_REFRESH_MS
-#define HA_ACTIVE_TAB_ALARM_REFRESH_MS 15000UL      /* Alarmo: 15 sec */
+#define HA_ACTIVE_TAB_ALARM_REFRESH_MS 5000UL      /* Alarmo: 5 sec */
 #endif
 
 #ifndef WEATHER_ACTIVE_TAB_REFRESH_MS
@@ -177,6 +177,7 @@
 #define HA_ALARMO_ENTITY ""
 #endif
 #define HA_MAX_ALARM_PANELS 8
+#define HA_MAX_ACTIVE_ALARM_SENSORS 24
 #define HA_ALARM_ACTION_QUEUE_SIZE 4
 #define HA_ALARM_SYNC_INTERVAL_MS 0UL  /* scheduled by active-tab UI policy */
 #define HA_ALARM_TRANSITION_SYNC_INTERVAL_MS 0UL

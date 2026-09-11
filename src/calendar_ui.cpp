@@ -96,6 +96,7 @@ lv_obj_t *g_home_network = nullptr;
 lv_obj_t *g_home_ha = nullptr;
 lv_obj_t *g_home_calendar = nullptr;
 lv_obj_t *g_home_system = nullptr;
+lv_obj_t *g_summary_title = nullptr;
 
 Dashboard g_dashboard = Dashboard::Calendar;
 bool g_person_visible[4] = {true, true, true, true};
@@ -664,7 +665,7 @@ void show_event_details_overlay(const CalendarEvent &event) {
     append_line("Calendar", calendar_name);
     append_line("Location", event.location);
     append_line("Status", event.status);
-    append_line("Home Assistant", event.source);
+    // append_line("Home Assistant", event.source);
 
     if (event.description[0] && used < sizeof(body) - 1) {
         const int written = snprintf(body + used, sizeof(body) - used,
@@ -988,11 +989,45 @@ void render_week() {
     if (g_status_label) set_label_text(g_status_label, home_assistant_status());
 
     if (g_summary_label) {
-        const size_t today_events = calendar_count_events_on_day(time_service_now());
         char summary[96];
-        snprintf(summary, sizeof(summary), "%u event%s today\n%u total this week",
-                 static_cast<unsigned>(today_events), today_events == 1 ? "" : "s",
-                 static_cast<unsigned>(CALENDAR_EVENT_COUNT));
+
+        if (g_week_offset == 0) {
+            //
+            // Current week: show today's count and this week's total.
+            //
+            if (g_summary_title) {
+                set_label_text(g_summary_title, "TODAY");
+            }
+
+            const size_t today_events =
+                calendar_count_events_on_day(time_service_now());
+
+            snprintf(
+                summary,
+                sizeof(summary),
+                "%u event%s today\n%u total this week",
+                static_cast<unsigned>(today_events),
+                today_events == 1 ? "" : "s",
+                static_cast<unsigned>(CALENDAR_EVENT_COUNT)
+            );
+        } else {
+            //
+            // Past/future week: all events in CALENDAR_EVENTS belong
+            // to the week currently being displayed.
+            //
+            if (g_summary_title) {
+                set_label_text(g_summary_title, "SELECTED WEEK");
+            }
+
+            snprintf(
+                summary,
+                sizeof(summary),
+                "%u event%s",
+                static_cast<unsigned>(CALENDAR_EVENT_COUNT),
+                CALENDAR_EVENT_COUNT == 1 ? "" : "s"
+            );
+        }
+
         set_label_text(g_summary_label, summary);
     }
 }
@@ -1184,8 +1219,8 @@ void create_calendar_dashboard() {
     // Home Assistant status below it, and the manual refresh action anchored
     // to the bottom.  Avoid instructional copy here so the calendar itself
     // remains the visual focus.
-    lv_obj_t *today_title = label(side, "TODAY", &lv_font_montserrat_14, theme().muted);
-    lv_obj_set_pos(today_title, 0, 0);
+    g_summary_title = label(side, "TODAY", &lv_font_montserrat_14, theme().muted);
+    lv_obj_set_pos(g_summary_title, 0, 0);
 
     g_summary_label = label(side, "Calendar starting...", &lv_font_montserrat_18, theme().text, 174);
     lv_label_set_long_mode(g_summary_label, LV_LABEL_LONG_WRAP);

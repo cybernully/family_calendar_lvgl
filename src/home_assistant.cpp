@@ -817,28 +817,35 @@ bool parse_alarm_snapshot(const String &payload, AlarmoSnapshot &out) {
     JsonDocument doc;
     const DeserializationError error = deserializeJson(doc, payload);
     if (error || !doc.is<JsonObject>()) {
-        ESP_LOGE("FamilyCalendar", "Alarmo state JSON error: %s",
+        ESP_LOGE("FamilyCalendar", "Alarmo + active sensors JSON error: %s",
                  error ? error.c_str() : "not an object");
         return false;
     }
 
     JsonObjectConst root = doc.as<JsonObjectConst>();
-    const char *entity_id = root["entity_id"] | "";
-    JsonObjectConst attrs = root["attributes"].as<JsonObjectConst>();
+    JsonObjectConst alarm = root["alarm"].as<JsonObjectConst>();
+    if (alarm.isNull()) {
+        ESP_LOGE("FamilyCalendar", "Alarmo + active sensors response missing alarm object");
+        return false;
+    }
+
+    const char *entity_id = alarm["entity_id"] | "";
 
     memset(&out, 0, sizeof(out));
     snprintf(out.entity_id, sizeof(out.entity_id), "%s", entity_id);
     snprintf(out.friendly_name, sizeof(out.friendly_name), "%s",
-             attrs["friendly_name"] | entity_id);
-    snprintf(out.state, sizeof(out.state), "%s", root["state"] | "unknown");
-    snprintf(out.next_state, sizeof(out.next_state), "%s", attrs["next_state"] | "");
-    snprintf(out.arm_mode, sizeof(out.arm_mode), "%s", attrs["arm_mode"] | "");
-    snprintf(out.last_triggered, sizeof(out.last_triggered), "%s", attrs["last_triggered"] | "");
-    snprintf(out.code_format, sizeof(out.code_format), "%s", attrs["code_format"] | "");
-    out.supported_features = attrs["supported_features"] | 0U;
-    out.delay_seconds = attrs["delay"].is<int>() ? attrs["delay"].as<int>() : 0;
+             alarm["friendly_name"] | entity_id);
+    snprintf(out.state, sizeof(out.state), "%s", alarm["state"] | "unknown");
+    snprintf(out.next_state, sizeof(out.next_state), "%s", alarm["next_state"] | "");
+    snprintf(out.arm_mode, sizeof(out.arm_mode), "%s", alarm["arm_mode"] | "");
+    snprintf(out.last_triggered, sizeof(out.last_triggered), "%s", alarm["last_triggered"] | "");
+    snprintf(out.code_format, sizeof(out.code_format), "%s", alarm["code_format"] | "");
+    out.supported_features = alarm["supported_features"] | 0U;
+    out.delay_seconds = alarm["delay"].is<int>() ? alarm["delay"].as<int>() : 0;
 
-    JsonVariantConst open = attrs["open_sensors"];
+    /* Alarmo's own list remains useful because it is limited to sensors that
+     * Alarmo considers relevant to its current arming configuration. */
+    JsonVariantConst open = alarm["open_sensors"];
     if (open.is<JsonObjectConst>()) {
         for (JsonPairConst kv : open.as<JsonObjectConst>()) append_open_sensor(out, kv.key().c_str());
     } else if (open.is<JsonArrayConst>()) {
@@ -850,6 +857,28 @@ bool parse_alarm_snapshot(const String &payload, AlarmoSnapshot &out) {
         strlcat(out.open_sensors, extra, sizeof(out.open_sensors));
     }
 
+    JsonArrayConst active = root["active_sensors"].as<JsonArrayConst>();
+    if (!active.isNull()) {
+        for (JsonObjectConst sensor : active) {
+            if (out.active_sensor_count >= HA_MAX_ACTIVE_ALARM_SENSORS) break;
+            AlarmActiveSensor &dest = out.active_sensors[out.active_sensor_count++];
+            const char *sensor_id = sensor["entity_id"] | "";
+            snprintf(dest.entity_id, sizeof(dest.entity_id), "%s", sensor_id);
+            snprintf(dest.name, sizeof(dest.name), "%s", sensor["name"] | sensor_id);
+            snprintf(dest.device_class, sizeof(dest.device_class), "%s",
+                     sensor["device_class"] | "");
+        }
+    }
+
+    if (root["active_sensor_total"].isNull()) {
+        out.active_sensor_total = out.active_sensor_count;
+    } else {
+        out.active_sensor_total = root["active_sensor_total"].as<uint16_t>();
+        if (out.active_sensor_total < out.active_sensor_count) {
+            out.active_sensor_total = out.active_sensor_count;
+        }
+    }
+
     out.valid = entity_id[0] != '\0';
     return out.valid;
 }
@@ -859,21 +888,74 @@ bool fetch_alarm_state() {
     snprintf(entity_id, sizeof(entity_id), "%s", alarm_service_entity());
     if (!entity_id[0]) return false;
 
+    /* Home Assistant performs the filtering.  The panel receives only the
+     * Alarmo fields it already needs plus active security-related binary
+     * sensors, instead of downloading the full /api/states payload. */
+    String template_text = R"HA(
+{% set alarm_id = '__ALARM_ENTITY__' %}
+{% set active_classes = ['door', 'garage_door', 'window', 'opening', 'motion'] %}
+{% set ns = namespace(items=[], total=0) %}
+{% for s in states.binary_sensor %}
+  {% set cls = s.attributes.get('device_class', '') %}
+  {% if s.state == 'on' and cls in active_classes %}
+    {% set ns.total = ns.total + 1 %}
+    {% if ns.items | length < __MAX_ACTIVE__ %}
+      {% set ns.items = ns.items + [{
+        'entity_id': s.entity_id,
+        'name': s.name,
+        'device_class': cls
+      }] %}
+    {% endif %}
+  {% endif %}
+{% endfor %}
+{{ {
+  'alarm': {
+    'entity_id': alarm_id,
+    'friendly_name': state_attr(alarm_id, 'friendly_name') or alarm_id,
+    'state': states(alarm_id),
+    'next_state': state_attr(alarm_id, 'next_state') or '',
+    'arm_mode': state_attr(alarm_id, 'arm_mode') or '',
+    'open_sensors': state_attr(alarm_id, 'open_sensors') or {},
+    'last_triggered': state_attr(alarm_id, 'last_triggered') or '',
+    'code_format': state_attr(alarm_id, 'code_format') or '',
+    'supported_features': state_attr(alarm_id, 'supported_features') or 0,
+    'delay': state_attr(alarm_id, 'delay') or 0
+  },
+  'active_sensor_total': ns.total,
+  'active_sensors': ns.items
+} | to_json }}
+)HA";
+
+    template_text.replace("__ALARM_ENTITY__", entity_id);
+    template_text.replace("__MAX_ACTIVE__", String(HA_MAX_ACTIVE_ALARM_SENSORS));
+
+    JsonDocument request;
+    request["template"] = template_text;
+    String body;
+    serializeJson(request, body);
+
     String payload;
-    const int code = http_get(String("/api/states/") + entity_id, payload);
+    const int code = http_post("/api/template", body, payload);
     if (code != 200) {
-        snprintf(g_status, sizeof(g_status), "HA Alarmo state failed HTTP %d", code);
-        ESP_LOGE("FamilyCalendar", "Alarmo state fetch for %s failed: HTTP %d payload=%.120s",
+        snprintf(g_status, sizeof(g_status), "HA Alarmo/sensor fetch failed HTTP %d", code);
+        ESP_LOGE("FamilyCalendar",
+                 "Alarmo + active sensor fetch for %s failed: HTTP %d payload=%.160s",
                  entity_id, code, payload.c_str());
         return false;
     }
 
-    AlarmoSnapshot snapshot = {};
-    if (!parse_alarm_snapshot(payload, snapshot)) return false;
-    g_sync_alarm = snapshot;
+    /* Parse directly into the global staging object rather than placing a
+     * several-KB snapshot on the 16 KB HA worker stack. */
+    memset(&g_sync_alarm, 0, sizeof(g_sync_alarm));
+    if (!parse_alarm_snapshot(payload, g_sync_alarm)) return false;
     __sync_synchronize();
     g_alarm_pending_ready = true;
     g_last_alarm_sync_ms = millis();
+
+    ESP_LOGI("FamilyCalendar",
+             "Alarmo + active sensors synced: %u active sensor(s), %u Alarmo-open sensor(s)",
+             static_cast<unsigned>(g_sync_alarm.active_sensor_total),
+             static_cast<unsigned>(g_sync_alarm.open_sensor_count));
     return true;
 }
 
