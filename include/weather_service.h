@@ -101,6 +101,8 @@ const char *weather_condition_label(WeatherCondition condition);
 float weather_display_temperature(float temperature_c);
 float weather_display_wind(float wind_mps);
 float weather_display_precip(float precip_mm);
+float weather_display_pressure(float pressure_hpa);
 const char *weather_temperature_unit();
 const char *weather_wind_unit();
 const char *weather_precip_unit();
+const char *weather_pressure_unit();

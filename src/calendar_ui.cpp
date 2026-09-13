@@ -353,7 +353,8 @@ lv_obj_t *create_weather_icon(lv_obj_t *parent,
                               WeatherCondition condition,
                               int size,
                               uint32_t primary,
-                              uint32_t secondary) {
+                              uint32_t secondary,
+                              const char *symbol_code = nullptr) {
     if (!parent) return nullptr;
     if (size < 20) size = 20;
 
@@ -409,6 +410,17 @@ lv_obj_t *create_weather_icon(lv_obj_t *parent,
         icon_piece(icon, size / 2 + cloud_h / 3, body_y - cloud_h / 3,
                    cloud_h, cloud_h, highlight, cloud_h / 2);
     };
+
+    if (symbol_code && strcmp(symbol_code, "clear-night") == 0) {
+        const uint32_t moon = 0xFDE68A;
+        const uint32_t mask = theme().panel_alt;
+        const int radius = size / 5;
+        const int cx = size / 2;
+        const int cy = size / 2;
+        icon_piece(icon, cx - radius, cy - radius, radius * 2, radius * 2, moon, radius);
+        icon_piece(icon, cx - radius / 3, cy - radius - 2, radius * 2, radius * 2, mask, radius);
+        return icon;
+    }
 
     switch (condition) {
         case WeatherCondition::Clear:
@@ -1616,8 +1628,172 @@ void create_meals_dashboard() {
 }
 
 void weather_refresh_cb(lv_event_t *) {
-    weather_service_request_refresh(false, "manual weather refresh");
+    weather_service_request_refresh(true, "manual weather refresh");
     request_rebuild();
+}
+
+uint32_t weather_condition_accent(WeatherCondition condition) {
+    switch (condition) {
+        case WeatherCondition::Clear: return 0xF59E0B;
+        case WeatherCondition::PartlyCloudy: return 0x60A5FA;
+        case WeatherCondition::Cloudy: return 0x94A3B8;
+        case WeatherCondition::Rain:
+        case WeatherCondition::Showers: return 0x3B82F6;
+        case WeatherCondition::Thunderstorm: return 0xFACC15;
+        case WeatherCondition::Snow: return 0x38BDF8;
+        case WeatherCondition::Fog: return 0xCBD5E1;
+        case WeatherCondition::Unknown: return theme().accent;
+    }
+    return theme().accent;
+}
+
+lv_obj_t *weather_centered_label(lv_obj_t *parent,
+                                 const char *text,
+                                 const lv_font_t *font,
+                                 uint32_t color,
+                                 int parent_width,
+                                 int width,
+                                 int y) {
+    lv_obj_t *obj = label(parent, text, font, color, width);
+    if (!obj) return nullptr;
+    lv_obj_set_style_text_align(obj, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+
+    /*
+     * Do not query lv_obj_get_width(parent) here.  These weather cards are
+     * created and populated before LVGL has completed a layout pass, so the
+     * queried width can still be the object's old/default width.  That made
+     * centered labels start at a negative X coordinate and clipped the left
+     * side of the day name, H/L text, and condition.  The caller already
+     * knows the card's exact width, so use that deterministic value instead.
+     */
+    lv_obj_set_pos(obj, (parent_width - width) / 2, y);
+    return obj;
+}
+
+void create_weather_metric_card(lv_obj_t *parent,
+                                int x,
+                                int y,
+                                int w,
+                                int h,
+                                const char *caption,
+                                const char *value,
+                                uint32_t accent) {
+    lv_obj_t *card = lv_obj_create(parent);
+    if (!card) return;
+    lv_obj_set_size(card, w, h);
+    lv_obj_set_pos(card, x, y);
+    style_box(card, theme().panel, 12, 1);
+
+    icon_piece(card, 14, 14, 10, 10, accent, 5);
+
+    lv_obj_t *cap = label(card, caption, &lv_font_montserrat_12, theme().muted, w - 46);
+    set_pos_if(cap, 32, 10);
+
+    lv_obj_t *val = label(card, value, &lv_font_montserrat_18, theme().text, w - 28);
+    if (val) lv_label_set_long_mode(val, LV_LABEL_LONG_DOT);
+    set_pos_if(val, 14, 42);
+}
+
+void create_weather_daily_card(lv_obj_t *parent,
+                               const WeatherDayForecast &day,
+                               int x,
+                               int y,
+                               int w,
+                               int h) {
+    lv_obj_t *card = lv_obj_create(parent);
+    if (!card) return;
+    lv_obj_set_size(card, w, h);
+    lv_obj_set_pos(card, x, y);
+    style_box(card, theme().panel_alt, 12, 1);
+
+    const uint32_t accent = weather_condition_accent(day.condition);
+    icon_piece(card, 0, 0, w, 4, accent, 2);
+
+    static const char *short_days[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+    char day_name[12] = "Day";
+    struct tm day_tm = {};
+    if (localtime_r(&day.local_day_epoch, &day_tm) && day_tm.tm_wday >= 0 && day_tm.tm_wday <= 6) {
+        snprintf(day_name, sizeof(day_name), "%s", short_days[day_tm.tm_wday]);
+    }
+
+    weather_centered_label(card, day_name, &lv_font_montserrat_18, theme().text, w, w - 16, 8);
+
+    lv_obj_t *icon = create_weather_icon(card,
+                                         day.condition,
+                                         52,
+                                         theme().text,
+                                         theme().accent,
+                                         day.symbol_code);
+    if (icon) lv_obj_set_pos(icon, (w - 52) / 2, 34);
+
+    char temps[32];
+    if (isfinite(day.high_c) && isfinite(day.low_c)) {
+        snprintf(temps, sizeof(temps), "%d / %d %s",
+                 rounded_display_temp(day.high_c),
+                 rounded_display_temp(day.low_c),
+                 weather_temperature_unit());
+    } else {
+        snprintf(temps, sizeof(temps), "-- / -- %s", weather_temperature_unit());
+    }
+    weather_centered_label(card, temps, &lv_font_montserrat_18, theme().text, w, w - 12, 91);
+
+    lv_obj_t *condition = weather_centered_label(card,
+                                                  weather_condition_label(day.condition),
+                                                  &lv_font_montserrat_12,
+                                                  theme().muted,
+                                                  w,
+                                                  w - 16,
+                                                  120);
+    if (condition) lv_label_set_long_mode(condition, LV_LABEL_LONG_DOT);
+}
+
+void create_weather_hourly_card(lv_obj_t *parent,
+                                const WeatherHourForecast &hour,
+                                int x,
+                                int y,
+                                int w,
+                                int h) {
+    /*
+     * Keep hourly tiles deliberately lightweight.  A full primitive weather
+     * icon is composed of several LVGL child objects.  Multiplying that by
+     * 18 hourly tiles created hundreds of objects during a single screen
+     * rebuild and could stall the LVGL task on the panel.  The hero and daily
+     * cards keep the full graphical icons; hourly cards use a colored
+     * condition marker instead.
+     */
+    lv_obj_t *card = lv_obj_create(parent);
+    if (!card) return;
+    lv_obj_set_size(card, w, h);
+    lv_obj_set_pos(card, x, y);
+    style_box(card, theme().panel_alt, 10, 1);
+
+    const uint32_t accent = weather_condition_accent(hour.condition);
+    icon_piece(card, 0, 0, w, 3, accent, 1);
+    icon_piece(card, 12, 37, 12, 12, accent, 6);
+
+    char time_text[16];
+    time_service_format_time(hour.epoch, time_text, sizeof(time_text));
+    lv_obj_t *time_label = label(card, time_text, &lv_font_montserrat_14, theme().muted, w - 20);
+    set_pos_if(time_label, 10, 8);
+
+    char temp[24];
+    if (isfinite(hour.temperature_c)) {
+        snprintf(temp, sizeof(temp), "%d %s",
+                 rounded_display_temp(hour.temperature_c),
+                 weather_temperature_unit());
+    } else {
+        snprintf(temp, sizeof(temp), "-- %s", weather_temperature_unit());
+    }
+    lv_obj_t *temp_label = label(card, temp, &lv_font_montserrat_18, theme().text, w - 42);
+    set_pos_if(temp_label, 32, 31);
+
+    lv_obj_t *condition = label(card,
+                                weather_condition_label(hour.condition),
+                                &lv_font_montserrat_12,
+                                theme().muted,
+                                w - 20);
+    if (condition) lv_label_set_long_mode(condition, LV_LABEL_LONG_DOT);
+    set_pos_if(condition, 10, 61);
 }
 
 void create_weather_dashboard() {
@@ -1626,47 +1802,58 @@ void create_weather_dashboard() {
     lv_obj_set_size(page, SCREEN_W - 16, PAGE_H);
     lv_obj_set_pos(page, 8, PAGE_Y);
     style_box(page, theme().panel, 14, 1);
-    lv_obj_set_style_pad_all(page, 16, LV_PART_MAIN);
-    lv_obj_add_flag(page, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scroll_dir(page, LV_DIR_VER);
+    lv_obj_set_style_pad_all(page, 12, LV_PART_MAIN);
+    lv_obj_remove_flag(page, LV_OBJ_FLAG_SCROLLABLE);
+
+    constexpr int CONTENT_W = 1228;
 
     weather_service_get_snapshot(g_weather_snapshot);
     const WeatherSnapshot &weather = g_weather_snapshot;
 
-    lv_obj_t *title = label(page, "Weather", &lv_font_montserrat_24, theme().text, 300);
+    ESP_LOGI("FamilyCalendar",
+             "[WeatherUI] Build start heap=%u daily=%u hourly=%u has_data=%d",
+             static_cast<unsigned>(ESP.getFreeHeap()),
+             static_cast<unsigned>(weather.daily_count),
+             static_cast<unsigned>(weather.hourly_count),
+             weather.has_data ? 1 : 0);
+
+    lv_obj_t *title = label(page, "Weather", &lv_font_montserrat_24, theme().text, 240);
     set_pos_if(title, 0, 0);
 
-    lv_obj_t *subtitle = label(
-        page,
-        "Forecast source: Home Assistant weather entity",
-        &lv_font_montserrat_12,
-        theme().muted,
-        520);
-    set_pos_if(subtitle, 0, 36);
+    char updated_text[96];
+    if (weather.last_updated_epoch > 0) {
+        char updated_time[24] = "--";
+        time_service_format_time(weather.last_updated_epoch, updated_time, sizeof(updated_time));
+        snprintf(updated_text, sizeof(updated_text), "Updated %s%s",
+                 updated_time,
+                 weather.in_progress ? "  |  refreshing" : "");
+    } else {
+        snprintf(updated_text, sizeof(updated_text), "%s", weather.status);
+    }
+    lv_obj_t *updated = label(page, updated_text, &lv_font_montserrat_12, theme().muted, 420);
+    set_pos_if(updated, 250, 8);
 
-    lv_obj_t *refresh = button(page, "Refresh", 108, 38, false, &lv_font_montserrat_14);
-    set_pos_if(refresh, 1120, 6);
+    lv_obj_t *refresh = button(page, "Refresh", 104, 36, false, &lv_font_montserrat_14);
+    set_pos_if(refresh, 1124, 0);
     if (refresh) lv_obj_add_event_cb(refresh, weather_refresh_cb, LV_EVENT_CLICKED, nullptr);
 
     if (!weather.configured) {
         lv_obj_t *card = lv_obj_create(page);
         if (!card) return;
-        lv_obj_set_size(card, 1228, 220);
-        lv_obj_set_pos(card, 0, 76);
-        style_box(card, theme().panel_alt, 12, 1);
+        lv_obj_set_size(card, CONTENT_W, 210);
+        lv_obj_set_pos(card, 0, 52);
+        style_box(card, theme().panel_alt, 14, 1);
         lv_obj_set_style_pad_all(card, 20, LV_PART_MAIN);
 
         lv_obj_t *heading = label(card, "Weather is not configured", &lv_font_montserrat_24, theme().text, 700);
         set_pos_if(heading, 0, 0);
-        lv_obj_t *body = label(
-            card,
-            "Add HA_WEATHER_ENTITY to include/app_local.h and point it at a weather.* entity.\n"
-            "That Home Assistant weather entity is the only weather data source used by this firmware.",
-            &lv_font_montserrat_16,
-            theme().muted,
-            1160);
+        lv_obj_t *body = label(card,
+                               "Configure the Home Assistant weather snapshot script and HA_WEATHER_ENTITY, then refresh.",
+                               &lv_font_montserrat_16,
+                               theme().muted,
+                               1120);
         if (body) lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
-        set_height_if(body, 120);
+        set_height_if(body, 100);
         set_pos_if(body, 0, 58);
         return;
     }
@@ -1677,239 +1864,184 @@ void create_weather_dashboard() {
 
     if (!weather.has_data) {
         lv_obj_t *loading = label(page,
-                                  weather.in_progress ? "Loading forecast..." : "Forecast queued...",
+                                  weather.in_progress ? "Loading weather snapshot..." : "Weather refresh queued...",
                                   &lv_font_montserrat_20,
                                   theme().muted,
-                                  420);
-        set_pos_if(loading, 0, 110);
+                                  520);
+        set_pos_if(loading, 0, 90);
         return;
     }
 
-    lv_obj_t *current = lv_obj_create(page);
-    if (!current) return;
-    lv_obj_set_size(current, 1228, 192);
-    lv_obj_set_pos(current, 0, 72);
-    style_box(current, theme().panel_alt, 14, 1);
-    lv_obj_set_style_pad_all(current, 18, LV_PART_MAIN);
+    // Current conditions hero -------------------------------------------------
+    constexpr int HERO_Y = 48;
+    constexpr int HERO_H = 152;
+    lv_obj_t *hero = lv_obj_create(page);
+    if (!hero) return;
+    lv_obj_set_size(hero, CONTENT_W, HERO_H);
+    lv_obj_set_pos(hero, 0, HERO_Y);
+    style_box(hero, theme().panel_alt, 16, 1);
 
-    lv_obj_t *current_icon = create_weather_icon(current,
+    const uint32_t hero_accent = weather_condition_accent(weather.current.condition);
+    icon_piece(hero, 0, 0, CONTENT_W, 5, hero_accent, 2);
+
+    lv_obj_t *current_icon = create_weather_icon(hero,
                                                  weather.current.condition,
-                                                 78,
+                                                 96,
                                                  theme().text,
-                                                 theme().accent);
-    set_pos_if(current_icon, 10, 24);
+                                                 theme().accent,
+                                                 weather.current.symbol_code);
+    set_pos_if(current_icon, 24, 28);
 
-    char temp_text[24];
-    snprintf(temp_text, sizeof(temp_text), "%d %s",
-             rounded_display_temp(weather.current.temperature_c),
-             weather_temperature_unit());
-    lv_obj_t *current_temp = label(current, temp_text, &lv_font_montserrat_28, theme().text, 200);
-    set_pos_if(current_temp, 110, 24);
+    char current_temp_text[32];
+    if (isfinite(weather.current.temperature_c)) {
+        snprintf(current_temp_text, sizeof(current_temp_text), "%d %s",
+                 rounded_display_temp(weather.current.temperature_c),
+                 weather_temperature_unit());
+    } else {
+        snprintf(current_temp_text, sizeof(current_temp_text), "-- %s", weather_temperature_unit());
+    }
+    lv_obj_t *current_temp = label(hero, current_temp_text, &lv_font_montserrat_28, theme().text, 210);
+    set_pos_if(current_temp, 142, 26);
 
-    lv_obj_t *condition = label(current,
+    lv_obj_t *condition = label(hero,
                                 weather_condition_label(weather.current.condition),
-                                &lv_font_montserrat_16,
+                                &lv_font_montserrat_18,
                                 theme().muted,
-                                220);
-    set_pos_if(condition, 112, 66);
+                                235);
+    set_pos_if(condition, 144, 67);
 
     char hi_low[48];
-    snprintf(hi_low, sizeof(hi_low), "Today %d/%d%s",
-             rounded_display_temp(weather.current.today_high_c),
-             rounded_display_temp(weather.current.today_low_c),
-             weather_temperature_unit());
-    lv_obj_t *daily_range = label(current, hi_low, &lv_font_montserrat_16, theme().text, 220);
-    set_pos_if(daily_range, 112, 94);
-
-    char humidity_text[48];
-    if (weather.current.humidity_pct >= 0) {
-        snprintf(humidity_text, sizeof(humidity_text), "Humidity %d%%", weather.current.humidity_pct);
+    if (isfinite(weather.current.today_high_c) && isfinite(weather.current.today_low_c)) {
+        snprintf(hi_low, sizeof(hi_low), "H %d   L %d %s",
+                 rounded_display_temp(weather.current.today_high_c),
+                 rounded_display_temp(weather.current.today_low_c),
+                 weather_temperature_unit());
     } else {
-        snprintf(humidity_text, sizeof(humidity_text), "Humidity --");
+        snprintf(hi_low, sizeof(hi_low), "H --   L -- %s", weather_temperature_unit());
     }
-    lv_obj_t *humidity = label(current, humidity_text, &lv_font_montserrat_16, theme().text, 210);
-    set_pos_if(humidity, 430, 26);
+    lv_obj_t *range = label(hero, hi_low, &lv_font_montserrat_16, theme().text, 235);
+    set_pos_if(range, 144, 101);
 
-    char wind_text[64];
-    snprintf(wind_text, sizeof(wind_text), "Wind %.1f %s %s",
-             weather_display_wind(weather.current.wind_mps),
-             weather_wind_unit(),
-             wind_direction_text(weather.current.wind_direction_deg));
-    lv_obj_t *wind = label(current, wind_text, &lv_font_montserrat_16, theme().text, 270);
-    set_pos_if(wind, 430, 58);
+    char humidity_value[32];
+    snprintf(humidity_value, sizeof(humidity_value),
+             weather.current.humidity_pct >= 0 ? "%d%%" : "--",
+             weather.current.humidity_pct >= 0 ? weather.current.humidity_pct : 0);
 
-    char precip_text[72];
+    char wind_value[64];
+    if (isfinite(weather.current.wind_mps)) {
+        snprintf(wind_value, sizeof(wind_value), "%.1f %s %s",
+                 weather_display_wind(weather.current.wind_mps),
+                 weather_wind_unit(),
+                 wind_direction_text(weather.current.wind_direction_deg));
+    } else {
+        snprintf(wind_value, sizeof(wind_value), "--");
+    }
+
+    char precip_value[64];
     if (weather.current.precipitation_probability_pct >= 0) {
-        snprintf(precip_text, sizeof(precip_text), "Precip %.2f %s (%d%%)",
+        snprintf(precip_value, sizeof(precip_value), "%.2f %s  %d%%",
                  weather_display_precip(weather.current.precipitation_mm),
                  weather_precip_unit(),
                  weather.current.precipitation_probability_pct);
     } else {
-        snprintf(precip_text, sizeof(precip_text), "Precip %.2f %s",
+        snprintf(precip_value, sizeof(precip_value), "%.2f %s",
                  weather_display_precip(weather.current.precipitation_mm),
                  weather_precip_unit());
     }
-    lv_obj_t *precip = label(current, precip_text, &lv_font_montserrat_16, theme().text, 300);
-    set_pos_if(precip, 430, 90);
 
-    char pressure_text[48];
-    if (!isnan(weather.current.pressure_hpa)) {
-        snprintf(pressure_text, sizeof(pressure_text), "Pressure %.0f hPa", weather.current.pressure_hpa);
+    char pressure_value[48];
+    if (isfinite(weather.current.pressure_hpa)) {
+#if WEATHER_USE_IMPERIAL
+        snprintf(pressure_value, sizeof(pressure_value), "%.2f %s",
+                 weather_display_pressure(weather.current.pressure_hpa),
+                 weather_pressure_unit());
+#else
+        snprintf(pressure_value, sizeof(pressure_value), "%.0f %s",
+                 weather_display_pressure(weather.current.pressure_hpa),
+                 weather_pressure_unit());
+#endif
     } else {
-        snprintf(pressure_text, sizeof(pressure_text), "Pressure --");
+        snprintf(pressure_value, sizeof(pressure_value), "--");
     }
-    lv_obj_t *pressure = label(current, pressure_text, &lv_font_montserrat_16, theme().text, 210);
-    set_pos_if(pressure, 430, 122);
 
-    char updated_line[128];
-    char updated_time[24] = "--";
-    if (weather.last_updated_epoch > 0) {
-        time_service_format_time(weather.last_updated_epoch, updated_time, sizeof(updated_time));
-    }
-    const uint32_t now_ms = millis();
-    uint32_t remaining_ms = 0;
-    if (static_cast<int32_t>(weather.next_refresh_ms - now_ms) > 0) {
-        remaining_ms = weather.next_refresh_ms - now_ms;
-    }
-    snprintf(updated_line, sizeof(updated_line), "Updated %s  |  Next refresh ~%lum",
-             updated_time, static_cast<unsigned long>(remaining_ms / 60000UL));
-    lv_obj_t *updated = label(current, updated_line, &lv_font_montserrat_12, theme().muted, 420);
-    set_pos_if(updated, 780, 132);
+    constexpr int METRIC_X = 398;
+    constexpr int METRIC_Y = 24;
+    constexpr int METRIC_W = 196;
+    constexpr int METRIC_H = 104;
+    constexpr int METRIC_GAP = 10;
+    create_weather_metric_card(hero, METRIC_X + 0 * (METRIC_W + METRIC_GAP), METRIC_Y,
+                               METRIC_W, METRIC_H, "HUMIDITY", humidity_value, 0x38BDF8);
+    create_weather_metric_card(hero, METRIC_X + 1 * (METRIC_W + METRIC_GAP), METRIC_Y,
+                               METRIC_W, METRIC_H, "WIND", wind_value, 0x60A5FA);
+    create_weather_metric_card(hero, METRIC_X + 2 * (METRIC_W + METRIC_GAP), METRIC_Y,
+                               METRIC_W, METRIC_H, "PRECIP", precip_value, 0x3B82F6);
+    create_weather_metric_card(hero, METRIC_X + 3 * (METRIC_W + METRIC_GAP), METRIC_Y,
+                               METRIC_W, METRIC_H, "PRESSURE", pressure_value, 0xA78BFA);
 
-    lv_obj_t *daily_heading = label(page, "Daily forecast", &lv_font_montserrat_18, theme().text, 240);
-    set_pos_if(daily_heading, 0, 280);
+    ESP_LOGI("FamilyCalendar", "[WeatherUI] Hero complete heap=%u",
+             static_cast<unsigned>(ESP.getFreeHeap()));
 
-    lv_obj_t *daily_card = lv_obj_create(page);
-    if (!daily_card) return;
-    lv_obj_set_size(daily_card, 1228, 164);
-    lv_obj_set_pos(daily_card, 0, 314);
-    style_box(daily_card, theme().panel_alt, 10, 1);
-    lv_obj_set_style_pad_all(daily_card, 12, LV_PART_MAIN);
+    // Six-day graphical forecast ---------------------------------------------
+    constexpr int DAILY_HEADING_Y = 214;
+    constexpr int DAILY_Y = 238;
+    constexpr int DAILY_H = 148;
+    constexpr int DAILY_W = 198;
+    constexpr int DAILY_GAP = 8;
 
-    char daily_text[512];
-    daily_text[0] = '\0';
-    size_t daily_used = 0;
-    const size_t daily_rows = weather.daily_count < 4 ? weather.daily_count : 4;
-    static const char *short_days[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
-    for (size_t i = 0; i < daily_rows; ++i) {
-        const WeatherDayForecast &day = weather.daily[i];
-        char day_name[12] = "Day";
-        struct tm day_tm = {};
-        if (localtime_r(&day.local_day_epoch, &day_tm) && day_tm.tm_wday >= 0 && day_tm.tm_wday <= 6) {
-            snprintf(day_name, sizeof(day_name), "%s", short_days[day_tm.tm_wday]);
+    lv_obj_t *daily_heading = label(page, "Daily", &lv_font_montserrat_18, theme().text, 160);
+    set_pos_if(daily_heading, 0, DAILY_HEADING_Y);
+
+    size_t daily_cards = weather.daily_count;
+    if (daily_cards > 6) daily_cards = 6;
+    if (daily_cards == 0) {
+        lv_obj_t *none = label(page, "No daily forecast available", &lv_font_montserrat_14, theme().muted, 360);
+        set_pos_if(none, 0, DAILY_Y + 24);
+    } else {
+        const int row_width = static_cast<int>(daily_cards) * DAILY_W +
+                              static_cast<int>(daily_cards - 1) * DAILY_GAP;
+        const int start_x = (CONTENT_W - row_width) / 2;
+        for (size_t i = 0; i < daily_cards; ++i) {
+            create_weather_daily_card(page,
+                                      weather.daily[i],
+                                      start_x + static_cast<int>(i) * (DAILY_W + DAILY_GAP),
+                                      DAILY_Y,
+                                      DAILY_W,
+                                      DAILY_H);
         }
-
-        char row[160];
-        if (day.precipitation_probability_pct >= 0) {
-            snprintf(row, sizeof(row), "%s  %d/%d%s  %s  %d%%  %.1f %s\n",
-                     day_name,
-                     rounded_display_temp(day.high_c),
-                     rounded_display_temp(day.low_c),
-                     weather_temperature_unit(),
-                     weather_condition_label(day.condition),
-                     day.precipitation_probability_pct,
-                     weather_display_wind(day.wind_max_mps),
-                     weather_wind_unit());
-        } else {
-            snprintf(row, sizeof(row), "%s  %d/%d%s  %s  %.1f %s\n",
-                     day_name,
-                     rounded_display_temp(day.high_c),
-                     rounded_display_temp(day.low_c),
-                     weather_temperature_unit(),
-                     weather_condition_label(day.condition),
-                     weather_display_wind(day.wind_max_mps),
-                     weather_wind_unit());
-        }
-
-        const int written = snprintf(daily_text + daily_used,
-                                     sizeof(daily_text) - daily_used,
-                                     "%s",
-                                     row);
-        if (written <= 0) break;
-        const size_t remaining = sizeof(daily_text) - daily_used;
-        if (static_cast<size_t>(written) >= remaining) {
-            daily_used = sizeof(daily_text) - 1;
-            break;
-        }
-        daily_used += static_cast<size_t>(written);
-    }
-    if (daily_used == 0) {
-        snprintf(daily_text, sizeof(daily_text), "No daily forecast data available yet.");
     }
 
-    lv_obj_t *daily_label = label(daily_card, daily_text, &lv_font_montserrat_14, theme().text, 1200);
-    if (daily_label) lv_label_set_long_mode(daily_label, LV_LABEL_LONG_WRAP);
-    set_height_if(daily_label, 140);
-    set_pos_if(daily_label, 0, 0);
+    ESP_LOGI("FamilyCalendar", "[WeatherUI] Daily complete heap=%u",
+             static_cast<unsigned>(ESP.getFreeHeap()));
 
-    lv_obj_t *hourly_heading = label(page, "Hourly forecast", &lv_font_montserrat_18, theme().text, 220);
-    set_pos_if(hourly_heading, 0, 494);
+    // Twelve-hour lightweight forecast ---------------------------------------
+    constexpr int HOURLY_HEADING_Y = 402;
+    constexpr int HOURLY_Y = 428;
+    constexpr int HOURLY_W = 198;
+    constexpr int HOURLY_H = 90;
+    constexpr int HOURLY_GAP = 8;
+    constexpr int HOURLY_ROW_GAP = 8;
+    constexpr size_t HOURLY_PER_ROW = 6;
 
-    lv_obj_t *hourly_card = lv_obj_create(page);
-    if (!hourly_card) return;
-    lv_obj_set_size(hourly_card, 1228, 196);
-    lv_obj_set_pos(hourly_card, 0, 526);
-    style_box(hourly_card, theme().panel_alt, 10, 1);
-    lv_obj_set_style_pad_all(hourly_card, 12, LV_PART_MAIN);
+    lv_obj_t *hourly_heading = label(page, "Next 12 hours", &lv_font_montserrat_18, theme().text, 220);
+    set_pos_if(hourly_heading, 0, HOURLY_HEADING_Y);
 
-    char hourly_text[640];
-    hourly_text[0] = '\0';
-    size_t hourly_used = 0;
-    size_t hourly_rows = weather.hourly_count < WEATHER_MAX_HOURLY_POINTS
-        ? weather.hourly_count
-        : WEATHER_MAX_HOURLY_POINTS;
-    if (hourly_rows > 8) hourly_rows = 8;
-    for (size_t i = 0; i < hourly_rows; ++i) {
-        const WeatherHourForecast &hour = weather.hourly[i];
-        char hhmm[16];
-        time_service_format_time(hour.epoch, hhmm, sizeof(hhmm));
-
-        char row[140];
-        if (hour.precipitation_probability_pct >= 0) {
-            snprintf(row, sizeof(row), "%s  %d%s  %s  rain %d%%  wind %.1f %s\n",
-                     hhmm,
-                     rounded_display_temp(hour.temperature_c),
-                     weather_temperature_unit(),
-                     weather_condition_label(hour.condition),
-                     hour.precipitation_probability_pct,
-                     weather_display_wind(hour.wind_mps),
-                     weather_wind_unit());
-        } else {
-            snprintf(row, sizeof(row), "%s  %d%s  %s  wind %.1f %s\n",
-                     hhmm,
-                     rounded_display_temp(hour.temperature_c),
-                     weather_temperature_unit(),
-                     weather_condition_label(hour.condition),
-                     weather_display_wind(hour.wind_mps),
-                     weather_wind_unit());
+    size_t hourly_cards = weather.hourly_count;
+    if (hourly_cards > 12) hourly_cards = 12;
+    if (hourly_cards == 0) {
+        lv_obj_t *none = label(page, "No hourly forecast available", &lv_font_montserrat_14, theme().muted, 360);
+        set_pos_if(none, 0, HOURLY_Y + 24);
+    } else {
+        for (size_t i = 0; i < hourly_cards; ++i) {
+            const size_t row = i / HOURLY_PER_ROW;
+            const size_t column = i % HOURLY_PER_ROW;
+            const int x = static_cast<int>(column) * (HOURLY_W + HOURLY_GAP);
+            const int y = HOURLY_Y + static_cast<int>(row) * (HOURLY_H + HOURLY_ROW_GAP);
+            create_weather_hourly_card(page, weather.hourly[i], x, y, HOURLY_W, HOURLY_H);
         }
-
-        const int written = snprintf(hourly_text + hourly_used,
-                                     sizeof(hourly_text) - hourly_used,
-                                     "%s",
-                                     row);
-        if (written <= 0) break;
-        const size_t remaining = sizeof(hourly_text) - hourly_used;
-        if (static_cast<size_t>(written) >= remaining) {
-            hourly_used = sizeof(hourly_text) - 1;
-            break;
-        }
-        hourly_used += static_cast<size_t>(written);
-    }
-    if (hourly_used == 0) {
-        snprintf(hourly_text, sizeof(hourly_text), "No hourly forecast data available yet.");
     }
 
-    lv_obj_t *hourly_label = label(hourly_card, hourly_text, &lv_font_montserrat_14, theme().text, 1200);
-    if (hourly_label) lv_label_set_long_mode(hourly_label, LV_LABEL_LONG_WRAP);
-    set_height_if(hourly_label, 172);
-    set_pos_if(hourly_label, 0, 0);
-
-    lv_obj_t *attrib = label(page, "Data from Home Assistant", &lv_font_montserrat_12, theme().muted, 260);
-    set_pos_if(attrib, 968, 728);
-
-    lv_obj_t *status = label(page, weather.status, &lv_font_montserrat_12, theme().muted, 780);
-    set_pos_if(status, 0, 728);
+    ESP_LOGI("FamilyCalendar", "[WeatherUI] Build complete heap=%u",
+             static_cast<unsigned>(ESP.getFreeHeap()));
 }
 
 

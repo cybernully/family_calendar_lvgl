@@ -29,20 +29,6 @@ struct WeatherUnits {
     char pressure[12];
 };
 
-struct DayAccumulator {
-    bool valid;
-    time_t local_day_epoch;
-    float high_c;
-    float low_c;
-    float precipitation_mm;
-    int precipitation_probability_pct;
-    float wind_max_mps;
-    WeatherCondition condition;
-    int condition_rank;
-    bool preferred_daytime_symbol;
-    char symbol_code[40];
-};
-
 WeatherWorkerWakeCallback g_wake_callback = nullptr;
 portMUX_TYPE g_weather_mux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -75,24 +61,6 @@ String clean_base_url() {
     String base(HA_BASE_URL);
     while (base.endsWith("/")) base.remove(base.length() - 1);
     return base;
-}
-
-String url_encode(const char *value) {
-    static const char hex[] = "0123456789ABCDEF";
-    String out;
-    if (!value) return out;
-    for (const unsigned char *p = reinterpret_cast<const unsigned char *>(value); *p; ++p) {
-        const unsigned char c = *p;
-        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-            (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
-            out += static_cast<char>(c);
-        } else {
-            out += '%';
-            out += hex[(c >> 4) & 0x0F];
-            out += hex[c & 0x0F];
-        }
-    }
-    return out;
 }
 
 void set_statusf(const char *format, ...) {
@@ -192,21 +160,6 @@ WeatherCondition map_ha_condition(const char *condition) {
     return WeatherCondition::Unknown;
 }
 
-int condition_rank(WeatherCondition condition) {
-    switch (condition) {
-        case WeatherCondition::Thunderstorm: return 90;
-        case WeatherCondition::Snow: return 80;
-        case WeatherCondition::Rain: return 70;
-        case WeatherCondition::Showers: return 65;
-        case WeatherCondition::Fog: return 55;
-        case WeatherCondition::Cloudy: return 45;
-        case WeatherCondition::PartlyCloudy: return 35;
-        case WeatherCondition::Clear: return 25;
-        case WeatherCondition::Unknown: return 0;
-    }
-    return 0;
-}
-
 bool same_local_day(time_t left, time_t right) {
     struct tm left_tm = {};
     struct tm right_tm = {};
@@ -256,17 +209,6 @@ float pressure_to_hpa(float value, const char *unit) {
     return value;
 }
 
-bool parse_forecast_array(JsonDocument &doc, JsonArrayConst &forecast) {
-    forecast = doc["service_response"][HA_WEATHER_ENTITY]["forecast"].as<JsonArrayConst>();
-    if (!forecast.isNull()) return true;
-
-    forecast = doc[HA_WEATHER_ENTITY]["forecast"].as<JsonArrayConst>();
-    if (!forecast.isNull()) return true;
-
-    forecast = doc["forecast"].as<JsonArrayConst>();
-    return !forecast.isNull();
-}
-
 int http_request(const char *method, const String &path, const String *body, String &payload) {
     payload = "";
     const String url = clean_base_url() + path;
@@ -286,9 +228,7 @@ int http_request(const char *method, const String &path, const String *body, Str
         if (body) http.addHeader("Content-Type", "application/json");
 
         int result = -1;
-        if (strcmp(method, "GET") == 0) {
-            result = http.GET();
-        } else if (strcmp(method, "POST") == 0 && body) {
+        if (strcmp(method, "POST") == 0 && body) {
             result = http.POST(*body);
         }
 
@@ -317,111 +257,108 @@ int http_request(const char *method, const String &path, const String *body, Str
     return code;
 }
 
-int http_get(const String &path, String &payload) {
-    return http_request("GET", path, nullptr, payload);
-}
-
 int http_post(const String &path, const String &body, String &payload) {
     return http_request("POST", path, &body, payload);
 }
 
-bool fetch_current_state(WeatherCurrent &current, WeatherUnits &units, time_t &updated_epoch) {
-    String payload;
-    const String path = String("/api/states/") + url_encode(HA_WEATHER_ENTITY);
-    const int code = http_get(path, payload);
-    if (code != 200) {
-        ESP_LOGW("FamilyCalendar", "[Weather] HA current-state HTTP %d", code);
-        return false;
-    }
+JsonObjectConst weather_snapshot_object(const JsonDocument &doc) {
+    JsonObjectConst service_response = doc["service_response"].as<JsonObjectConst>();
+    if (!service_response.isNull()) return service_response;
+    return doc.as<JsonObjectConst>();
+}
 
+bool parse_weather_snapshot(const String &payload,
+                            WeatherCurrent &current,
+                            WeatherUnits &units,
+                            WeatherHourForecast *hourly,
+                            size_t &hourly_count,
+                            WeatherDayForecast *daily,
+                            size_t &daily_count,
+                            time_t &updated_epoch) {
     JsonDocument doc;
     const DeserializationError error = deserializeJson(doc, payload);
     if (error || !doc.is<JsonObject>()) {
-        ESP_LOGW("FamilyCalendar", "[Weather] Current-state JSON parse failed: %s",
+        ESP_LOGW("FamilyCalendar", "[Weather] Snapshot JSON parse failed: %s",
                  error ? error.c_str() : "not object");
         return false;
     }
 
-    JsonObjectConst attrs = doc["attributes"].as<JsonObjectConst>();
-    const char *condition = doc["state"] | "";
-    const char *updated = doc["last_updated"] | "";
+    const JsonObjectConst snapshot = weather_snapshot_object(doc);
+    if (snapshot.isNull()) {
+        ESP_LOGW("FamilyCalendar", "[Weather] Snapshot response missing service_response");
+        return false;
+    }
+
+    const JsonObjectConst current_json = snapshot["current"].as<JsonObjectConst>();
+    const JsonObjectConst units_json = snapshot["units"].as<JsonObjectConst>();
+    const JsonArrayConst daily_json = snapshot["daily"].as<JsonArrayConst>();
+    const JsonArrayConst hourly_json = snapshot["hourly"].as<JsonArrayConst>();
+
+    if (current_json.isNull() || units_json.isNull() || daily_json.isNull() || hourly_json.isNull()) {
+        ESP_LOGW("FamilyCalendar", "[Weather] Snapshot missing current/units/daily/hourly data");
+        return false;
+    }
 
     memset(&current, 0, sizeof(current));
-    current.valid = true;
-    current.condition = map_ha_condition(condition);
-    snprintf(current.symbol_code, sizeof(current.symbol_code), "%s", condition);
-    current.humidity_pct = attrs["humidity"].isNull() ? -1 : attrs["humidity"].as<int>();
-
-    snprintf(units.temperature, sizeof(units.temperature), "%s", attrs["temperature_unit"] | "C");
-    snprintf(units.wind, sizeof(units.wind), "%s", attrs["wind_speed_unit"] | "m/s");
-    snprintf(units.precip, sizeof(units.precip), "%s", attrs["precipitation_unit"] | "mm");
-    snprintf(units.pressure, sizeof(units.pressure), "%s", attrs["pressure_unit"] | "hPa");
-
-    if (!attrs["temperature"].isNull()) {
-        current.temperature_c = temperature_to_c(attrs["temperature"].as<float>(), units.temperature);
-    }
-    if (!attrs["wind_speed"].isNull()) {
-        current.wind_mps = wind_to_mps(attrs["wind_speed"].as<float>(), units.wind);
-    }
-    if (!attrs["wind_bearing"].isNull()) {
-        current.wind_direction_deg = attrs["wind_bearing"].as<float>();
-    } else {
-        current.wind_direction_deg = NAN;
-    }
-    if (!attrs["pressure"].isNull()) {
-        current.pressure_hpa = pressure_to_hpa(attrs["pressure"].as<float>(), units.pressure);
-    } else {
-        current.pressure_hpa = NAN;
-    }
-    if (!attrs["precipitation"].isNull()) {
-        current.precipitation_mm = precip_to_mm(attrs["precipitation"].as<float>(), units.precip);
-    }
-    current.precipitation_probability_pct = attrs["precipitation_probability"].isNull()
-                                                ? -1
-                                                : attrs["precipitation_probability"].as<int>();
-
-    if (!parse_iso8601(updated, updated_epoch)) {
-        updated_epoch = time_service_now();
-    }
-    current.epoch = updated_epoch;
-
-    return true;
-}
-
-bool fetch_daily_forecast(const WeatherUnits &units,
-                          WeatherDayForecast *daily,
-                          size_t &daily_count,
-                          const time_t now_epoch) {
-    JsonDocument request;
-    request["entity_id"] = HA_WEATHER_ENTITY;
-    request["type"] = "daily";
-    String body;
-    serializeJson(request, body);
-
-    String payload;
-    const int code = http_post("/api/services/weather/get_forecasts?return_response", body, payload);
-    if (code != 200) {
-        ESP_LOGW("FamilyCalendar", "[Weather] HA daily forecast HTTP %d", code);
-        return false;
-    }
-
-    JsonDocument doc;
-    const DeserializationError error = deserializeJson(doc, payload);
-    if (error) {
-        ESP_LOGW("FamilyCalendar", "[Weather] Daily forecast JSON parse failed: %s", error.c_str());
-        return false;
-    }
-
-    JsonArrayConst forecast;
-    if (!parse_forecast_array(doc, forecast)) {
-        ESP_LOGW("FamilyCalendar", "[Weather] Daily forecast array missing");
-        return false;
-    }
-
+    memset(hourly, 0, WEATHER_MAX_HOURLY_POINTS * sizeof(WeatherHourForecast));
     memset(daily, 0, WEATHER_MAX_DAILY_POINTS * sizeof(WeatherDayForecast));
+    hourly_count = 0;
     daily_count = 0;
 
-    for (JsonObjectConst point : forecast) {
+    current.temperature_c = NAN;
+    current.today_high_c = NAN;
+    current.today_low_c = NAN;
+    current.humidity_pct = -1;
+    current.pressure_hpa = NAN;
+    current.wind_mps = NAN;
+    current.wind_direction_deg = NAN;
+    current.precipitation_mm = 0.0f;
+    current.precipitation_probability_pct = -1;
+
+    snprintf(units.temperature, sizeof(units.temperature), "%s", units_json["temperature"] | "C");
+    snprintf(units.wind, sizeof(units.wind), "%s", units_json["wind"] | "m/s");
+    snprintf(units.precip, sizeof(units.precip), "%s", units_json["precipitation"] | "mm");
+    snprintf(units.pressure, sizeof(units.pressure), "%s", units_json["pressure"] | "hPa");
+
+    const char *condition_text = current_json["condition"] | "";
+    current.condition = map_ha_condition(condition_text);
+    snprintf(current.symbol_code, sizeof(current.symbol_code), "%s", condition_text);
+
+    if (!current_json["temperature"].isNull()) {
+        current.temperature_c = temperature_to_c(current_json["temperature"].as<float>(), units.temperature);
+    }
+    if (!current_json["today_high"].isNull()) {
+        current.today_high_c = temperature_to_c(current_json["today_high"].as<float>(), units.temperature);
+    }
+    if (!current_json["today_low"].isNull()) {
+        current.today_low_c = temperature_to_c(current_json["today_low"].as<float>(), units.temperature);
+    }
+    if (!current_json["humidity"].isNull()) {
+        current.humidity_pct = current_json["humidity"].as<int>();
+    }
+    if (!current_json["pressure"].isNull()) {
+        current.pressure_hpa = pressure_to_hpa(current_json["pressure"].as<float>(), units.pressure);
+    }
+    if (!current_json["wind_speed"].isNull()) {
+        current.wind_mps = wind_to_mps(current_json["wind_speed"].as<float>(), units.wind);
+    }
+    if (!current_json["wind_bearing"].isNull()) {
+        current.wind_direction_deg = current_json["wind_bearing"].as<float>();
+    }
+    if (!current_json["precipitation"].isNull()) {
+        current.precipitation_mm = precip_to_mm(current_json["precipitation"].as<float>(), units.precip);
+    }
+    if (!current_json["precipitation_probability"].isNull()) {
+        current.precipitation_probability_pct = current_json["precipitation_probability"].as<int>();
+    }
+
+    const char *updated = current_json["last_updated"] | "";
+    if (!parse_iso8601(updated, updated_epoch)) updated_epoch = time_service_now();
+    current.epoch = updated_epoch;
+
+    const time_t now_epoch = time_service_now();
+
+    for (JsonObjectConst point : daily_json) {
         if (daily_count >= WEATHER_MAX_DAILY_POINTS) break;
 
         const char *datetime = point["datetime"] | point["time"] | "";
@@ -448,7 +385,6 @@ bool fetch_daily_forecast(const WeatherUnits &units,
 
         out.high_c = isnan(high) ? NAN : temperature_to_c(high, units.temperature);
         out.low_c = isnan(low) ? out.high_c : temperature_to_c(low, units.temperature);
-
         out.precipitation_mm = point["precipitation"].isNull()
                                    ? 0.0f
                                    : precip_to_mm(point["precipitation"].as<float>(), units.precip);
@@ -468,169 +404,90 @@ bool fetch_daily_forecast(const WeatherUnits &units,
         out.local_day_epoch = mktime(&local_tm);
     }
 
-    return daily_count > 0;
-}
+    for (JsonObjectConst point : hourly_json) {
+        if (hourly_count >= WEATHER_MAX_HOURLY_POINTS) break;
 
-bool fetch_hourly_forecast(const WeatherUnits &units,
-                           WeatherHourForecast *hourly,
-                           size_t &hourly_count,
-                           WeatherDayForecast *daily_fallback,
-                           size_t &daily_fallback_count,
-                           const time_t now_epoch,
-                           WeatherCurrent &current) {
-    JsonDocument request;
-    request["entity_id"] = HA_WEATHER_ENTITY;
-    request["type"] = "hourly";
-    String body;
-    serializeJson(request, body);
-
-    String payload;
-    const int code = http_post("/api/services/weather/get_forecasts?return_response", body, payload);
-    if (code != 200) {
-        ESP_LOGW("FamilyCalendar", "[Weather] HA hourly forecast HTTP %d", code);
-        return false;
-    }
-
-    JsonDocument doc;
-    const DeserializationError error = deserializeJson(doc, payload);
-    if (error) {
-        ESP_LOGW("FamilyCalendar", "[Weather] Hourly forecast JSON parse failed: %s", error.c_str());
-        return false;
-    }
-
-    JsonArrayConst forecast;
-    if (!parse_forecast_array(doc, forecast)) {
-        ESP_LOGW("FamilyCalendar", "[Weather] Hourly forecast array missing");
-        return false;
-    }
-
-    memset(hourly, 0, WEATHER_MAX_HOURLY_POINTS * sizeof(WeatherHourForecast));
-    memset(daily_fallback, 0, WEATHER_MAX_DAILY_POINTS * sizeof(WeatherDayForecast));
-    hourly_count = 0;
-    daily_fallback_count = 0;
-
-    DayAccumulator accum[WEATHER_MAX_DAILY_POINTS] = {};
-    bool current_temp_backfilled = !isnan(current.temperature_c);
-
-    size_t parsed = 0;
-    for (JsonObjectConst point : forecast) {
         const char *datetime = point["datetime"] | point["time"] | "";
         time_t epoch = 0;
         if (!parse_iso8601(datetime, epoch)) continue;
+        if (epoch < now_epoch - 300) continue;
 
-        const char *condition_text = point["condition"] | "";
-        const WeatherCondition condition = map_ha_condition(condition_text);
+        WeatherHourForecast &out = hourly[hourly_count++];
+        out.valid = true;
+        out.epoch = epoch;
 
-        const float temp_raw = point["temperature"].isNull() ? NAN : point["temperature"].as<float>();
-        const float temp_c = isnan(temp_raw) ? NAN : temperature_to_c(temp_raw, units.temperature);
-        const float wind_raw = point["wind_speed"].isNull() ? 0.0f : point["wind_speed"].as<float>();
-        const float wind_mps = wind_to_mps(wind_raw, units.wind);
-        const float precip_raw = point["precipitation"].isNull() ? 0.0f : point["precipitation"].as<float>();
-        const float precip_mm = precip_to_mm(precip_raw, units.precip);
-        const int precip_prob = point["precipitation_probability"].isNull()
-                                    ? -1
-                                    : static_cast<int>(lroundf(point["precipitation_probability"].as<float>()));
+        const char *condition = point["condition"] | "";
+        out.condition = map_ha_condition(condition);
+        snprintf(out.symbol_code, sizeof(out.symbol_code), "%s", condition);
 
-        if (epoch >= now_epoch && hourly_count < WEATHER_MAX_HOURLY_POINTS) {
-            WeatherHourForecast &out = hourly[hourly_count++];
-            out.valid = true;
-            out.epoch = epoch;
-            out.condition = condition;
-            snprintf(out.symbol_code, sizeof(out.symbol_code), "%s", condition_text);
-            out.temperature_c = temp_c;
-            out.precipitation_mm = precip_mm;
-            out.precipitation_probability_pct = precip_prob;
-            out.wind_mps = wind_mps;
+        const float temperature = point["temperature"].isNull() ? NAN : point["temperature"].as<float>();
+        out.temperature_c = isnan(temperature) ? NAN : temperature_to_c(temperature, units.temperature);
+        out.precipitation_mm = point["precipitation"].isNull()
+                                   ? 0.0f
+                                   : precip_to_mm(point["precipitation"].as<float>(), units.precip);
+        out.precipitation_probability_pct = point["precipitation_probability"].isNull()
+                                                ? -1
+                                                : static_cast<int>(lroundf(point["precipitation_probability"].as<float>()));
+        out.wind_mps = point["wind_speed"].isNull()
+                           ? 0.0f
+                           : wind_to_mps(point["wind_speed"].as<float>(), units.wind);
+    }
 
-            if (!current_temp_backfilled && !isnan(temp_c)) {
-                current.temperature_c = temp_c;
-                current.condition = condition;
-                snprintf(current.symbol_code, sizeof(current.symbol_code), "%s", condition_text);
-                current_temp_backfilled = true;
-            }
+    if ((!isfinite(current.temperature_c) || current.condition == WeatherCondition::Unknown) && hourly_count > 0) {
+        if (isfinite(hourly[0].temperature_c)) current.temperature_c = hourly[0].temperature_c;
+        if (current.condition == WeatherCondition::Unknown) {
+            current.condition = hourly[0].condition;
+            snprintf(current.symbol_code, sizeof(current.symbol_code), "%s", hourly[0].symbol_code);
         }
+    }
 
-        struct tm local_tm = {};
-        localtime_r(&epoch, &local_tm);
-        const int local_hour = local_tm.tm_hour;
-        local_tm.tm_hour = 0;
-        local_tm.tm_min = 0;
-        local_tm.tm_sec = 0;
-        local_tm.tm_isdst = -1;
-        const time_t day_epoch = mktime(&local_tm);
-
-        int slot = -1;
-        for (size_t i = 0; i < WEATHER_MAX_DAILY_POINTS; ++i) {
-            if (accum[i].valid && accum[i].local_day_epoch == day_epoch) {
-                slot = static_cast<int>(i);
+    if ((!isfinite(current.today_high_c) || !isfinite(current.today_low_c)) && daily_count > 0) {
+        size_t today_index = 0;
+        for (size_t i = 0; i < daily_count; ++i) {
+            if (same_local_day(daily[i].local_day_epoch, now_epoch)) {
+                today_index = i;
                 break;
             }
         }
-        if (slot < 0) {
-            for (size_t i = 0; i < WEATHER_MAX_DAILY_POINTS; ++i) {
-                if (!accum[i].valid) {
-                    slot = static_cast<int>(i);
-                    accum[i].valid = true;
-                    accum[i].local_day_epoch = day_epoch;
-                    accum[i].high_c = isnan(temp_c) ? -1000.0f : temp_c;
-                    accum[i].low_c = isnan(temp_c) ? 1000.0f : temp_c;
-                    accum[i].precipitation_mm = 0.0f;
-                    accum[i].precipitation_probability_pct = -1;
-                    accum[i].wind_max_mps = 0.0f;
-                    accum[i].condition = condition;
-                    accum[i].condition_rank = condition_rank(condition);
-                    accum[i].preferred_daytime_symbol = false;
-                    snprintf(accum[i].symbol_code, sizeof(accum[i].symbol_code), "%s", condition_text);
-                    break;
-                }
-            }
-        }
-
-        if (slot >= 0) {
-            DayAccumulator &day = accum[slot];
-            if (!isnan(temp_c)) {
-                if (temp_c > day.high_c) day.high_c = temp_c;
-                if (temp_c < day.low_c) day.low_c = temp_c;
-            }
-            day.precipitation_mm += precip_mm;
-            if (precip_prob > day.precipitation_probability_pct) {
-                day.precipitation_probability_pct = precip_prob;
-            }
-            if (wind_mps > day.wind_max_mps) day.wind_max_mps = wind_mps;
-
-            const int rank = condition_rank(condition);
-            const bool daytime = local_hour >= 11 && local_hour <= 16;
-            if (daytime && !day.preferred_daytime_symbol && rank > 0) {
-                day.condition = condition;
-                snprintf(day.symbol_code, sizeof(day.symbol_code), "%s", condition_text);
-                day.condition_rank = rank;
-                day.preferred_daytime_symbol = true;
-            } else if (!day.preferred_daytime_symbol && rank >= day.condition_rank) {
-                day.condition = condition;
-                snprintf(day.symbol_code, sizeof(day.symbol_code), "%s", condition_text);
-                day.condition_rank = rank;
-            }
-        }
-
-        ++parsed;
-        if ((parsed % 12U) == 0U) vTaskDelay(1);
+        if (!isfinite(current.today_high_c)) current.today_high_c = daily[today_index].high_c;
+        if (!isfinite(current.today_low_c)) current.today_low_c = daily[today_index].low_c;
     }
 
-    for (size_t i = 0; i < WEATHER_MAX_DAILY_POINTS; ++i) {
-        if (!accum[i].valid) continue;
-        WeatherDayForecast &out = daily_fallback[daily_fallback_count++];
-        out.valid = true;
-        out.local_day_epoch = accum[i].local_day_epoch;
-        out.condition = accum[i].condition;
-        snprintf(out.symbol_code, sizeof(out.symbol_code), "%s", accum[i].symbol_code);
-        out.high_c = accum[i].high_c < -900.0f ? NAN : accum[i].high_c;
-        out.low_c = accum[i].low_c > 900.0f ? out.high_c : accum[i].low_c;
-        out.precipitation_mm = accum[i].precipitation_mm;
-        out.precipitation_probability_pct = accum[i].precipitation_probability_pct;
-        out.wind_max_mps = accum[i].wind_max_mps;
+    if (!isfinite(current.today_high_c)) current.today_high_c = current.temperature_c;
+    if (!isfinite(current.today_low_c)) current.today_low_c = current.temperature_c;
+
+    current.valid = isfinite(current.temperature_c) || current.condition != WeatherCondition::Unknown;
+    return current.valid && (daily_count > 0 || hourly_count > 0);
+}
+
+bool fetch_weather_snapshot(WeatherCurrent &current,
+                            WeatherUnits &units,
+                            WeatherHourForecast *hourly,
+                            size_t &hourly_count,
+                            WeatherDayForecast *daily,
+                            size_t &daily_count,
+                            time_t &updated_epoch) {
+    static const char *kWeatherSnapshotPath =
+        "/api/services/script/family_calendar_weather_snapshot?return_response";
+
+    String payload;
+    const String body = "{}";
+    const int code = http_post(kWeatherSnapshotPath, body, payload);
+    if (code != 200) {
+        ESP_LOGW("FamilyCalendar", "[Weather] Snapshot HTTP %d", code);
+        return false;
     }
 
-    return hourly_count > 0;
+    ESP_LOGD("FamilyCalendar", "[Weather] Snapshot payload %u bytes",
+             static_cast<unsigned>(payload.length()));
+    return parse_weather_snapshot(payload,
+                                  current,
+                                  units,
+                                  hourly,
+                                  hourly_count,
+                                  daily,
+                                  daily_count,
+                                  updated_epoch);
 }
 
 void log_next_refresh(uint32_t now_ms, uint32_t next_refresh_ms) {
@@ -650,7 +507,7 @@ void weather_service_begin() {
         set_statusf("Weather not configured");
         return;
     }
-    set_statusf("Weather ready (Home Assistant)");
+    set_statusf("Weather ready (HA snapshot)");
 }
 
 void weather_service_set_worker_wake_callback(WeatherWorkerWakeCallback callback) {
@@ -726,7 +583,7 @@ bool weather_service_request_refresh(bool force, const char *reason) {
 
     if (!queued) return false;
 
-    ESP_LOGI("FamilyCalendar", "[Weather] Fetch queued from Home Assistant (%s)",
+    ESP_LOGI("FamilyCalendar", "[Weather] Snapshot fetch queued (%s)",
              reason ? reason : "no reason");
     if (g_wake_callback) g_wake_callback();
     return true;
@@ -780,70 +637,37 @@ bool weather_service_worker_fetch() {
     portEXIT_CRITICAL(&g_weather_mux);
     if (!should_fetch) return false;
 
-    ESP_LOGI("FamilyCalendar", "[Weather] Fetch start (source: Home Assistant)");
+    ESP_LOGI("FamilyCalendar", "[Weather] Fetch start (single HA snapshot request)");
 
     WeatherCurrent current = {};
     WeatherUnits units = {};
     WeatherHourForecast hourly[WEATHER_MAX_HOURLY_POINTS] = {};
     WeatherDayForecast daily[WEATHER_MAX_DAILY_POINTS] = {};
-    WeatherDayForecast daily_from_hourly[WEATHER_MAX_DAILY_POINTS] = {};
     size_t hourly_count = 0;
     size_t daily_count = 0;
-    size_t daily_from_hourly_count = 0;
     time_t updated_epoch = 0;
 
     const uint32_t started_ms = millis();
-    const time_t now_epoch = time_service_now();
-
-    const bool current_ok = fetch_current_state(current, units, updated_epoch);
-    if (current_ok) vTaskDelay(pdMS_TO_TICKS(HA_HTTP_INTER_REQUEST_GAP_MS));
-
-    const bool daily_ok = fetch_daily_forecast(units, daily, daily_count, now_epoch);
-    if (daily_ok) vTaskDelay(pdMS_TO_TICKS(HA_HTTP_INTER_REQUEST_GAP_MS));
-
-    const bool hourly_ok = fetch_hourly_forecast(units,
-                                                 hourly,
-                                                 hourly_count,
-                                                 daily_from_hourly,
-                                                 daily_from_hourly_count,
-                                                 now_epoch,
-                                                 current);
-
+    const bool snapshot_ok = fetch_weather_snapshot(current,
+                                                    units,
+                                                    hourly,
+                                                    hourly_count,
+                                                    daily,
+                                                    daily_count,
+                                                    updated_epoch);
     const uint32_t elapsed_ms = millis() - started_ms;
 
-    if (!current_ok || (!daily_ok && !hourly_ok)) {
-        ESP_LOGW("FamilyCalendar", "[Weather] HA weather fetch failed in %lums", static_cast<unsigned long>(elapsed_ms));
+    if (!snapshot_ok) {
+        ESP_LOGW("FamilyCalendar", "[Weather] HA snapshot fetch failed in %lums",
+                 static_cast<unsigned long>(elapsed_ms));
         const uint32_t retry_due_ms = now_ms + WEATHER_RETRY_INTERVAL_MS;
         portENTER_CRITICAL(&g_weather_mux);
         g_next_refresh_ms = retry_due_ms;
         g_in_progress = false;
-        snprintf(g_status, sizeof(g_status), "Weather fetch failed");
+        snprintf(g_status, sizeof(g_status), "Weather snapshot fetch failed");
         portEXIT_CRITICAL(&g_weather_mux);
         log_next_refresh(now_ms, retry_due_ms);
         return true;
-    }
-
-    if (!daily_ok && hourly_ok) {
-        memcpy(daily, daily_from_hourly, sizeof(daily));
-        daily_count = daily_from_hourly_count;
-    }
-
-    if (daily_count > 0) {
-        size_t idx = 0;
-        bool found_today = false;
-        for (size_t i = 0; i < daily_count; ++i) {
-            if (same_local_day(daily[i].local_day_epoch, now_epoch)) {
-                idx = i;
-                found_today = true;
-                break;
-            }
-        }
-        if (!found_today) idx = 0;
-        current.today_high_c = daily[idx].high_c;
-        current.today_low_c = daily[idx].low_c;
-    } else {
-        current.today_high_c = current.temperature_c;
-        current.today_low_c = current.temperature_c;
     }
 
     const uint32_t next_refresh_ms = now_ms + WEATHER_ACTIVE_TAB_REFRESH_MS;
@@ -862,10 +686,11 @@ bool weather_service_worker_fetch() {
     g_has_data = true;
     g_publish_pending = true;
     g_in_progress = false;
-    snprintf(g_status, sizeof(g_status), "Weather updated from Home Assistant");
+    snprintf(g_status, sizeof(g_status), "Weather updated from HA snapshot");
     portEXIT_CRITICAL(&g_weather_mux);
 
-    ESP_LOGI("FamilyCalendar", "[Weather] HTTP 200 (HA APIs) in %lums", static_cast<unsigned long>(elapsed_ms));
+    ESP_LOGI("FamilyCalendar", "[Weather] Snapshot HTTP 200 in %lums",
+             static_cast<unsigned long>(elapsed_ms));
     ESP_LOGI("FamilyCalendar", "[Weather] Parsed %u hourly / %u daily entries",
              static_cast<unsigned>(hourly_count), static_cast<unsigned>(daily_count));
     log_next_refresh(now_ms, next_refresh_ms);
@@ -963,6 +788,14 @@ float weather_display_precip(float precip_mm) {
 #endif
 }
 
+float weather_display_pressure(float pressure_hpa) {
+#if WEATHER_USE_IMPERIAL
+    return pressure_hpa / 33.8639f;
+#else
+    return pressure_hpa;
+#endif
+}
+
 const char *weather_temperature_unit() {
 #if WEATHER_USE_IMPERIAL
     return "F";
@@ -986,3 +819,11 @@ const char *weather_precip_unit() {
     return "mm";
 #endif
 }
+const char *weather_pressure_unit() {
+#if WEATHER_USE_IMPERIAL
+    return "inHg";
+#else
+    return "hPa";
+#endif
+}
+
