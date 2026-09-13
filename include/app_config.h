@@ -95,7 +95,7 @@
 #define HA_ACTIVE_TAB_CHORES_REFRESH_MS 60000UL     /* Chores: 1 min */
 #endif
 #ifndef HA_ACTIVE_TAB_ALARM_REFRESH_MS
-#define HA_ACTIVE_TAB_ALARM_REFRESH_MS 5000UL      /* Alarmo: 5 sec */
+#define HA_ACTIVE_TAB_ALARM_REFRESH_MS 1000UL      /* Alarmo: 1 sec */
 #endif
 
 #ifndef WEATHER_ACTIVE_TAB_REFRESH_MS

@@ -2214,7 +2214,7 @@ void create_alarm_dashboard() {
     const AlarmoSnapshot *snapshot = alarm_service_snapshot();
     if (!snapshot || !snapshot->valid) {
         home_assistant_request_alarm_sync();
-        lv_obj_t *title = label(page, "Alarmo", &lv_font_montserrat_24, theme().text, 300);
+        lv_obj_t *title = label(page, "Alarm & Security", &lv_font_montserrat_24, theme().text, 300);
         lv_obj_set_pos(title, 0, 0);
         lv_obj_t *loading = label(page, "Loading alarm state in the background...", &lv_font_montserrat_18,
                                   theme().muted, 760);
@@ -2225,12 +2225,12 @@ void create_alarm_dashboard() {
         return;
     }
 
-    lv_obj_t *title = label(page, "Alarmo", &lv_font_montserrat_24, theme().text, 260);
+    lv_obj_t *title = label(page, "Alarm & Security", &lv_font_montserrat_24, theme().text, 260);
     lv_obj_set_pos(title, 0, 0);
-    lv_obj_t *source = label(page, snapshot->friendly_name, &lv_font_montserrat_14, theme().muted, 500);
-    lv_obj_set_pos(source, 0, 38);
-    lv_obj_t *auto_note = label(page, "Auto-refresh while visible: 15 sec", &lv_font_montserrat_12, theme().muted, 260);
-    lv_obj_set_pos(auto_note, 520, 40);
+    //lv_obj_t *source = label(page, snapshot->friendly_name, &lv_font_montserrat_14, theme().muted, 500);
+    //lv_obj_set_pos(source, 0, 38);
+    //lv_obj_t *auto_note = label(page, "Auto-refresh while visible: 15 sec", &lv_font_montserrat_12, theme().muted, 260);
+    //lv_obj_set_pos(auto_note, 520, 40);
 
     lv_obj_t *refresh = button(page, "Refresh", 110, 40, false, &lv_font_montserrat_14);
     lv_obj_set_pos(refresh, 958, 4);
@@ -2273,22 +2273,118 @@ void create_alarm_dashboard() {
     lv_obj_set_height(next, 48);
     lv_obj_set_pos(next, 0, 88);
 
-    lv_obj_t *sensor_caption = label(status_card, "OPEN SENSORS", &lv_font_montserrat_14, theme().muted, STATUS_W - 44);
-    lv_obj_set_pos(sensor_caption, 0, 158);
-    char sensors[380];
-    if (snapshot->open_sensor_count == 0) {
-        snprintf(sensors, sizeof(sensors), "None reported");
+    lv_obj_t *sensor_caption = label(
+        status_card,
+        "ACTIVE SENSORS",
+        &lv_font_montserrat_14,
+        theme().muted,
+        STATUS_W - 44
+    );
+    lv_obj_set_pos(sensor_caption, 0, 128);  //158
+
+    char sensors[380] = {};
+
+    if (snapshot->active_sensor_count == 0) {
+        snprintf(
+            sensors,
+            sizeof(sensors),
+            "All sensors clear"
+        );
     } else {
-        snprintf(sensors, sizeof(sensors), "%u open\n%s",
-                 static_cast<unsigned>(snapshot->open_sensor_count),
-                 snapshot->open_sensors[0] ? snapshot->open_sensors : "See Home Assistant");
+        const unsigned total =
+            snapshot->active_sensor_total > 0
+                ? static_cast<unsigned>(snapshot->active_sensor_total)
+                : static_cast<unsigned>(snapshot->active_sensor_count);
+
+        snprintf(
+            sensors,
+            sizeof(sensors),
+            "%u active",
+            total
+        );
+
+        constexpr uint16_t MAX_DISPLAYED_SENSORS = 5;
+
+        const uint16_t display_count =
+            snapshot->active_sensor_count < MAX_DISPLAYED_SENSORS
+                ? snapshot->active_sensor_count
+                : MAX_DISPLAYED_SENSORS;
+
+        for (uint16_t i = 0; i < display_count; ++i) {
+            const AlarmActiveSensor &sensor =
+                snapshot->active_sensors[i];
+
+            const bool motion =
+                strcmp(sensor.device_class, "motion") == 0;
+
+            const char *state_text =
+                motion ? "MOTION" : "OPEN";
+
+            char line[128];
+
+            snprintf(
+                line,
+                sizeof(line),
+                "\n%s  -  %s",
+                sensor.name[0]
+                    ? sensor.name
+                    : sensor.entity_id,
+                state_text
+            );
+
+            strlcat(
+                sensors,
+                line,
+                sizeof(sensors)
+            );
+        }
+
+        if (total > display_count) {
+            char more[40];
+
+            snprintf(
+                more,
+                sizeof(more),
+                "\n+%u more",
+                total - display_count
+            );
+
+            strlcat(
+                sensors,
+                more,
+                sizeof(sensors)
+            );
+        }
     }
-    lv_obj_t *sensor_text = label(status_card, sensors, &lv_font_montserrat_16,
-                                  snapshot->open_sensor_count ? (g_dark_mode ? 0xFBBF24 : 0xB45309) : theme().text,
-                                  STATUS_W - 44);
-    lv_label_set_long_mode(sensor_text, LV_LABEL_LONG_WRAP);
-    lv_obj_set_height(sensor_text, 120);
-    lv_obj_set_pos(sensor_text, 0, 190);
+
+    const uint32_t sensor_color =
+        snapshot->active_sensor_count > 0
+            ? (g_dark_mode ? 0xFBBF24 : 0xB45309)
+            : theme().success;
+
+    lv_obj_t *sensor_text = label(
+        status_card,
+        sensors,
+        &lv_font_montserrat_16,
+        sensor_color,
+        STATUS_W - 44
+    );
+
+    lv_label_set_long_mode(
+        sensor_text,
+        LV_LABEL_LONG_WRAP
+    );
+
+    lv_obj_set_height(
+        sensor_text,
+        150 //120
+    );
+
+    lv_obj_set_pos(
+        sensor_text,
+        0,
+        160 //190
+    );
 
     lv_obj_t *last_caption = label(status_card, "LAST TRIGGERED", &lv_font_montserrat_14, theme().muted, STATUS_W - 44);
     lv_obj_set_pos(last_caption, 0, 336);
@@ -2666,6 +2762,21 @@ void service_active_dashboard_auto_refresh(uint32_t now) {
     /* The display being asleep is a strong signal that nobody is looking at
      * the dashboard, so do not spend ESP-Hosted/TLS traffic refreshing it. */
     if (!board_display_awake()) return;
+
+    /*
+    * Do not auto-refresh while a modal/overlay is open.
+    *
+    * For Alarm, keep moving the refresh timestamp forward while the
+    * user is interacting with the popup. This prevents an immediate
+    * refresh the instant the popup closes.
+    */
+    if (g_overlay) {
+        if (g_dashboard == Dashboard::Alarm) {
+            g_last_alarm_auto_request_ms = now;
+        }
+        return;
+    }
+
     if (now - g_dashboard_entered_ms < HA_ACTIVE_TAB_SETTLE_MS) return;
     if (!home_assistant_ready_for_auto_refresh()) return;
 
@@ -2827,7 +2938,7 @@ void calendar_ui_loop() {
         board_set_display_awake(false, g_backlight);
     }
 
-    if (g_rebuild_pending) {
+    if (g_rebuild_pending && !g_overlay) {
         rebuild_ui();
     }
 

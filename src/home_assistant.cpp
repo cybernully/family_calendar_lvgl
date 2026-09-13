@@ -892,39 +892,130 @@ bool fetch_alarm_state() {
      * Alarmo fields it already needs plus active security-related binary
      * sensors, instead of downloading the full /api/states payload. */
     String template_text = R"HA(
-{% set alarm_id = '__ALARM_ENTITY__' %}
-{% set active_classes = ['door', 'garage_door', 'window', 'opening', 'motion'] %}
-{% set ns = namespace(items=[], total=0) %}
-{% for s in states.binary_sensor %}
-  {% set cls = s.attributes.get('device_class', '') %}
-  {% if s.state == 'on' and cls in active_classes %}
-    {% set ns.total = ns.total + 1 %}
-    {% if ns.items | length < __MAX_ACTIVE__ %}
-      {% set ns.items = ns.items + [{
-        'entity_id': s.entity_id,
-        'name': s.name,
-        'device_class': cls
-      }] %}
-    {% endif %}
-  {% endif %}
-{% endfor %}
-{{ {
-  'alarm': {
-    'entity_id': alarm_id,
-    'friendly_name': state_attr(alarm_id, 'friendly_name') or alarm_id,
-    'state': states(alarm_id),
-    'next_state': state_attr(alarm_id, 'next_state') or '',
-    'arm_mode': state_attr(alarm_id, 'arm_mode') or '',
-    'open_sensors': state_attr(alarm_id, 'open_sensors') or {},
-    'last_triggered': state_attr(alarm_id, 'last_triggered') or '',
-    'code_format': state_attr(alarm_id, 'code_format') or '',
-    'supported_features': state_attr(alarm_id, 'supported_features') or 0,
-    'delay': state_attr(alarm_id, 'delay') or 0
-  },
-  'active_sensor_total': ns.total,
-  'active_sensors': ns.items
-} | to_json }}
-)HA";
+                                {% set alarm_id = '__ALARM_ENTITY__' %}
+        
+                                {#
+                                ============================================================
+                                Family Calendar - Alarmo + labeled active sensors
+                                ============================================================
+
+                                Entity labels:
+                                    alarmo-contact
+                                    alarmo-motion
+
+                                Assign labels directly to the entity, such as:
+                                    binary_sensor.contact_sensor_intrusion
+
+                                This does not depend on the entity's HA device_class.
+                                A Ring "Safety / Intrusion" sensor can therefore still be
+                                treated as an opening sensor.
+                                #}
+
+                                {% set max_items = 24 %}
+
+                                {% set contact_label = label_id('alarmo-contact') %}
+                                {% set motion_label = label_id('alarmo-motion') %}
+
+                                {% set ns = namespace(
+                                    items=[],
+                                    seen=[],
+                                    total=0
+                                ) %}
+
+
+                                {# ----------------------------------------------------------
+                                LABELED BINARY SENSORS
+                                ---------------------------------------------------------- #}
+
+                                {% for s in states.binary_sensor %}
+
+                                {% set entity_labels = labels(s.entity_id) %}
+
+                                {% set is_contact =
+                                    contact_label is not none
+                                    and contact_label in entity_labels %}
+
+                                {% set is_motion =
+                                    motion_label is not none
+                                    and motion_label in entity_labels %}
+
+                                {% if s.state == 'on'
+                                        and (is_contact or is_motion)
+                                        and s.entity_id not in ns.seen %}
+
+                                    {% set ns.total = ns.total + 1 %}
+                                    {% set ns.seen = ns.seen + [s.entity_id] %}
+
+                                    {% if ns.items | count < max_items %}
+
+                                    {% set display_class =
+                                        'motion' if is_motion else 'opening' %}
+
+                                    {% set ns.items = ns.items + [{
+                                        'entity_id': s.entity_id,
+                                        'name': s.name,
+                                        'device_class': display_class
+                                    }] %}
+
+                                    {% endif %}
+
+                                {% endif %}
+
+                                {% endfor %}
+
+
+                                {# ----------------------------------------------------------
+                                ALARMO PANEL
+                                ---------------------------------------------------------- #}
+
+                                {% set alarm = expand(alarm_id) | first %}
+
+
+                                {# ----------------------------------------------------------
+                                FINAL JSON RESPONSE
+                                ---------------------------------------------------------- #}
+
+                                {{ {
+                                'alarm': {
+                                    'entity_id':
+                                        alarm.entity_id,
+
+                                    'friendly_name':
+                                        alarm.name,
+
+                                    'state':
+                                        alarm.state,
+
+                                    'next_state':
+                                        alarm.attributes.next_state | default(''),
+
+                                    'arm_mode':
+                                        alarm.attributes.arm_mode | default(''),
+
+                                    'open_sensors':
+                                        alarm.attributes.open_sensors | default({}),
+
+                                    'last_triggered':
+                                        alarm.attributes.last_triggered | default(''),
+
+                                    'code_format':
+                                        alarm.attributes.code_format | default(''),
+
+                                    'supported_features':
+                                        alarm.attributes.supported_features | default(0),
+
+                                    'delay':
+                                        alarm.attributes.delay | default(0)
+                                },
+
+                                'active_sensor_total':
+                                    ns.total,
+
+                                'active_sensors':
+                                    ns.items
+
+                                } | to_json }}
+                            )HA";
 
     template_text.replace("__ALARM_ENTITY__", entity_id);
     template_text.replace("__MAX_ACTIVE__", String(HA_MAX_ACTIVE_ALARM_SENSORS));
