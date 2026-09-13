@@ -1423,8 +1423,9 @@ uint32_t home_assistant_take_changes() {
     if (g_alarm_pending_ready) {
         __sync_synchronize();
         if (strcmp(g_sync_alarm.entity_id, alarm_service_entity()) == 0) {
-            alarm_service_replace(g_sync_alarm);
-            g_change_flags |= HA_CHANGE_ALARM;
+            if (alarm_service_replace(g_sync_alarm)) {
+                g_change_flags |= HA_CHANGE_ALARM;
+            }
         }
         g_alarm_pending_ready = false;
     }

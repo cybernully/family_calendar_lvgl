@@ -80,6 +80,10 @@ const ThemeColors DARK = {
 };
 
 lv_obj_t *g_screen = nullptr;
+lv_obj_t *g_root_screen = nullptr;
+lv_obj_t *g_header_root = nullptr;
+lv_obj_t *g_footer_root = nullptr;
+lv_obj_t *g_header_page_label = nullptr;
 lv_obj_t *g_header_date = nullptr;
 lv_obj_t *g_header_time = nullptr;
 lv_obj_t *g_wifi_state = nullptr;
@@ -91,6 +95,14 @@ lv_obj_t *g_day_columns[7] = {};
 lv_obj_t *g_filter_buttons[4] = {};
 lv_obj_t *g_overlay = nullptr;
 bool g_wake_sensor_picker_open = false;
+
+constexpr size_t DASHBOARD_COUNT = 6;
+lv_obj_t *g_page_roots[DASHBOARD_COUNT] = {};
+bool g_page_built[DASHBOARD_COUNT] = {};
+bool g_page_dirty[DASHBOARD_COUNT] = {true, true, true, true, true, true};
+lv_obj_t *g_nav_buttons[DASHBOARD_COUNT] = {};
+lv_obj_t *g_nav_icons[DASHBOARD_COUNT] = {};
+lv_obj_t *g_nav_captions[DASHBOARD_COUNT] = {};
 
 lv_obj_t *g_home_network = nullptr;
 lv_obj_t *g_home_ha = nullptr;
@@ -106,6 +118,7 @@ bool g_dark_mode = APP_DEFAULT_DARK_MODE != 0;
 uint32_t g_screen_timeout_seconds = APP_SCREEN_TIMEOUT_SECONDS;
 uint32_t g_last_user_activity_ms = 0;
 bool g_rebuild_pending = false;
+bool g_full_rebuild_pending = false;
 bool g_chore_choose_list = false;
 bool g_alarm_choose_panel = false;
 
@@ -147,6 +160,8 @@ WeatherSnapshot g_weather_snapshot = {};
 
 const char *screen_timeout_text(uint32_t seconds);
 const char *selected_wake_sensor_name();
+void activate_dashboard(Dashboard dashboard);
+void request_full_rebuild();
 
 const ThemeColors &theme() {
     return g_dark_mode ? DARK : LIGHT;
@@ -174,6 +189,10 @@ const char *dashboard_symbol(Dashboard dashboard) {
         case Dashboard::Settings: return SYMBOL_SETTINGS;
     }
     return SYMBOL_CALENDAR;
+}
+
+size_t dashboard_index(Dashboard dashboard) {
+    return static_cast<size_t>(dashboard);
 }
 
 void style_box(lv_obj_t *obj, uint32_t bg, int radius = 12, int border = 0) {
@@ -534,8 +553,18 @@ void persist_ui_state() {
     g_ui_preferences.putUInt("timeout", g_screen_timeout_seconds);
 }
 
+void mark_dashboard_dirty(Dashboard dashboard) {
+    const size_t index = dashboard_index(dashboard);
+    if (index < DASHBOARD_COUNT) g_page_dirty[index] = true;
+}
+
 void request_rebuild() {
+    mark_dashboard_dirty(g_dashboard);
     g_rebuild_pending = true;
+}
+
+void request_full_rebuild() {
+    g_full_rebuild_pending = true;
 }
 
 void close_overlay() {
@@ -711,19 +740,17 @@ void dashboard_nav_cb(lv_event_t *e) {
     const intptr_t value = reinterpret_cast<intptr_t>(lv_event_get_user_data(e));
     if (value < 0 || value > 5) return;
     const Dashboard next = static_cast<Dashboard>(value);
-    if (next != g_dashboard) {
-        g_dashboard = next;
-        g_dashboard_entered_ms = millis();
-    }
     close_overlay();
-    request_rebuild();
+    activate_dashboard(next);
 }
 
 void theme_toggle_cb(lv_event_t *) {
     g_dark_mode = !g_dark_mode;
     persist_ui_state();
     close_overlay();
-    request_rebuild();
+    /* Theme colors are baked into many widget styles.  A theme change is the
+     * intentionally rare case where v2 rebuilds the persistent shell/pages. */
+    request_full_rebuild();
 }
 
 void brightness_cb(lv_event_t *e) {
@@ -751,6 +778,7 @@ void update_clock() {
 
 void create_header() {
     lv_obj_t *header = lv_obj_create(g_screen);
+    g_header_root = header;
     lv_obj_set_size(header, SCREEN_W, HEADER_H);
     lv_obj_set_pos(header, 0, 0);
     style_box(header, theme().panel, 0, 0);
@@ -765,8 +793,8 @@ void create_header() {
 
     char subtitle[64];
     snprintf(subtitle, sizeof(subtitle), "%s dashboard  |  v%s", dashboard_name(g_dashboard), APP_VERSION);
-    lv_obj_t *page = label(header, subtitle, &lv_font_montserrat_14, theme().muted, 330);
-    lv_obj_set_pos(page, 24, 50);
+    g_header_page_label = label(header, subtitle, &lv_font_montserrat_14, theme().muted, 330);
+    lv_obj_set_pos(g_header_page_label, 24, 50);
 
     g_header_date = label(header, "", &lv_font_montserrat_18, theme().text, 360);
     lv_obj_set_pos(g_header_date, 390, 12);
@@ -822,6 +850,7 @@ void create_header() {
 
 void create_footer() {
     lv_obj_t *footer = lv_obj_create(g_screen);
+    g_footer_root = footer;
     lv_obj_set_size(footer, SCREEN_W, FOOTER_H);
     lv_obj_set_pos(footer, 0, FOOTER_Y);
     style_box(footer, theme().panel, 0, 0);
@@ -855,6 +884,13 @@ void create_footer() {
             dashboard_nav_cb,
             LV_EVENT_CLICKED,
             reinterpret_cast<void *>(static_cast<intptr_t>(dashboard)));
+
+        const size_t index = dashboard_index(dashboard);
+        if (index < DASHBOARD_COUNT) {
+            g_nav_buttons[index] = nav;
+            g_nav_icons[index] = lv_obj_get_child(nav, 0);
+            g_nav_captions[index] = lv_obj_get_child(nav, 1);
+        }
         x += BUTTON_W + GAP;
     }
 }
@@ -2877,13 +2913,45 @@ void create_home_dashboard() {
     update_home_dashboard();
 }
 
+void reset_dashboard_pointers(Dashboard dashboard) {
+    switch (dashboard) {
+        case Dashboard::Calendar:
+            g_status_label = nullptr;
+            g_summary_label = nullptr;
+            g_summary_title = nullptr;
+            g_week_label = nullptr;
+            memset(g_day_columns, 0, sizeof(g_day_columns));
+            memset(g_filter_buttons, 0, sizeof(g_filter_buttons));
+            break;
+        case Dashboard::Settings:
+            g_home_network = nullptr;
+            g_home_ha = nullptr;
+            g_home_calendar = nullptr;
+            g_home_system = nullptr;
+            break;
+        case Dashboard::Chores:
+        case Dashboard::Meals:
+        case Dashboard::Weather:
+        case Dashboard::Alarm:
+            break;
+    }
+}
+
 void reset_ui_pointers() {
+    g_header_root = nullptr;
+    g_footer_root = nullptr;
+    g_header_page_label = nullptr;
     g_header_date = nullptr;
     g_header_time = nullptr;
     g_wifi_state = nullptr;
     memset(g_wifi_bars, 0, sizeof(g_wifi_bars));
+    memset(g_nav_buttons, 0, sizeof(g_nav_buttons));
+    memset(g_nav_icons, 0, sizeof(g_nav_icons));
+    memset(g_nav_captions, 0, sizeof(g_nav_captions));
+    memset(g_page_roots, 0, sizeof(g_page_roots));
     g_status_label = nullptr;
     g_summary_label = nullptr;
+    g_summary_title = nullptr;
     g_week_label = nullptr;
     g_overlay = nullptr;
     g_alarm_code_input = nullptr;
@@ -2893,6 +2961,172 @@ void reset_ui_pointers() {
     g_home_system = nullptr;
     memset(g_day_columns, 0, sizeof(g_day_columns));
     memset(g_filter_buttons, 0, sizeof(g_filter_buttons));
+}
+
+void create_page_roots() {
+    for (size_t i = 0; i < DASHBOARD_COUNT; ++i) {
+        lv_obj_t *root = lv_obj_create(g_screen);
+        g_page_roots[i] = root;
+        lv_obj_set_size(root, SCREEN_W, SCREEN_H);
+        lv_obj_set_pos(root, 0, 0);
+        lv_obj_set_style_bg_opa(root, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_style_border_width(root, 0, LV_PART_MAIN);
+        lv_obj_set_style_pad_all(root, 0, LV_PART_MAIN);
+        lv_obj_set_style_shadow_width(root, 0, LV_PART_MAIN);
+        lv_obj_remove_flag(root, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_remove_flag(root, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_flag(root, LV_OBJ_FLAG_HIDDEN);
+        g_page_built[i] = false;
+        g_page_dirty[i] = true;
+    }
+}
+
+void update_shell_dashboard_state() {
+    if (g_header_page_label) {
+        char subtitle[64];
+        snprintf(subtitle, sizeof(subtitle), "%s dashboard  |  v%s",
+                 dashboard_name(g_dashboard), APP_VERSION);
+        set_label_text(g_header_page_label, subtitle);
+    }
+
+    for (size_t i = 0; i < DASHBOARD_COUNT; ++i) {
+        lv_obj_t *nav = g_nav_buttons[i];
+        if (!nav) continue;
+
+        const bool active = i == dashboard_index(g_dashboard);
+        const uint32_t bg = active ? theme().accent : theme().button;
+        const uint32_t pressed = active ? theme().accent : theme().button_pressed;
+        const uint32_t text = active ? 0xFFFFFF : theme().text;
+
+        lv_obj_set_style_bg_color(nav, lv_color_hex(bg), LV_PART_MAIN);
+        lv_obj_set_style_border_width(nav, active ? 0 : 1, LV_PART_MAIN);
+        if (!active) {
+            lv_obj_set_style_border_color(nav, lv_color_hex(theme().border), LV_PART_MAIN);
+        }
+        lv_obj_set_style_bg_color(
+            nav,
+            lv_color_hex(pressed),
+            static_cast<lv_style_selector_t>(
+                static_cast<uint32_t>(LV_PART_MAIN) |
+                static_cast<uint32_t>(LV_STATE_PRESSED)));
+
+        if (g_nav_icons[i]) {
+            lv_obj_set_style_text_color(g_nav_icons[i], lv_color_hex(text), LV_PART_MAIN);
+        }
+        if (g_nav_captions[i]) {
+            lv_obj_set_style_text_color(g_nav_captions[i], lv_color_hex(text), LV_PART_MAIN);
+        }
+    }
+}
+
+void build_dashboard_page(Dashboard dashboard) {
+    const size_t index = dashboard_index(dashboard);
+    if (index >= DASHBOARD_COUNT || !g_page_roots[index]) return;
+
+    lv_obj_t *root = g_page_roots[index];
+    reset_dashboard_pointers(dashboard);
+    lv_obj_clean(root);
+
+    /* Existing dashboard builders use g_screen as their top-level parent.
+     * Point it at this dashboard's persistent root only while constructing the
+     * page, then immediately restore the real LVGL screen for overlays and
+     * global shell operations. */
+    lv_obj_t *saved_screen = g_screen;
+    g_screen = root;
+
+    switch (dashboard) {
+        case Dashboard::Calendar:
+            create_calendar_dashboard();
+            break;
+        case Dashboard::Chores:
+            create_chores_dashboard();
+            break;
+        case Dashboard::Meals:
+            create_meals_dashboard();
+            break;
+        case Dashboard::Weather:
+            create_weather_dashboard();
+            break;
+        case Dashboard::Alarm:
+            create_alarm_dashboard();
+            break;
+        case Dashboard::Settings:
+            create_home_dashboard();
+            break;
+    }
+
+    g_screen = saved_screen;
+    g_page_built[index] = true;
+    g_page_dirty[index] = false;
+
+    ESP_LOGI("FamilyCalendar",
+             "[UI v2] Built %s page; free heap=%u, free PSRAM=%u",
+             dashboard_name(dashboard),
+             static_cast<unsigned>(ESP.getFreeHeap()),
+             static_cast<unsigned>(ESP.getFreePsram()));
+}
+
+void show_only_dashboard(Dashboard dashboard) {
+    const size_t active_index = dashboard_index(dashboard);
+    for (size_t i = 0; i < DASHBOARD_COUNT; ++i) {
+        lv_obj_t *root = g_page_roots[i];
+        if (!root) continue;
+        if (i == active_index) {
+            lv_obj_remove_flag(root, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(root, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
+void activate_dashboard(Dashboard dashboard) {
+    const size_t index = dashboard_index(dashboard);
+    if (index >= DASHBOARD_COUNT) return;
+
+    const bool changed = dashboard != g_dashboard;
+    if (changed) {
+        g_dashboard = dashboard;
+        g_dashboard_entered_ms = millis();
+    }
+
+    /* Build while hidden so the previously visible page remains intact until
+     * the new page is ready.  Subsequent tab switches are hide/show only. */
+    if (!g_page_built[index] || g_page_dirty[index]) {
+        build_dashboard_page(dashboard);
+    }
+
+    show_only_dashboard(dashboard);
+    update_shell_dashboard_state();
+    g_rebuild_pending = false;
+
+    if (g_root_screen) lv_obj_invalidate(g_root_screen);
+}
+
+void rebuild_all_ui() {
+    g_full_rebuild_pending = false;
+    g_rebuild_pending = false;
+
+    reset_ui_pointers();
+    lv_obj_clean(g_screen);
+    lv_obj_set_style_bg_color(g_screen, lv_color_hex(theme().bg), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(g_screen, LV_OPA_COVER, LV_PART_MAIN);
+
+    /* Page roots are created first so the persistent header/footer always sit
+     * above page content in LVGL's sibling order. */
+    create_page_roots();
+    create_header();
+    create_footer();
+
+    build_dashboard_page(g_dashboard);
+    show_only_dashboard(g_dashboard);
+    update_shell_dashboard_state();
+    update_clock();
+
+    lv_obj_invalidate(g_screen);
+    ESP_LOGI("FamilyCalendar",
+             "[UI v2] Persistent shell ready; free heap=%u, free PSRAM=%u",
+             static_cast<unsigned>(ESP.getFreeHeap()),
+             static_cast<unsigned>(ESP.getFreePsram()));
 }
 
 bool auto_refresh_due(uint32_t now, uint32_t last_attempt_ms, uint32_t last_ui_request_ms, uint32_t interval_ms) {
@@ -2990,43 +3224,22 @@ void service_active_dashboard_auto_refresh(uint32_t now) {
 
 void rebuild_ui() {
     g_rebuild_pending = false;
-    reset_ui_pointers();
-    lv_obj_clean(g_screen);
-    lv_obj_set_style_bg_color(g_screen, lv_color_hex(theme().bg), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(g_screen, LV_OPA_COVER, LV_PART_MAIN);
+    const size_t index = dashboard_index(g_dashboard);
+    if (index >= DASHBOARD_COUNT || !g_page_roots[index]) return;
 
-    create_header();
-    create_footer();
-
-    switch (g_dashboard) {
-        case Dashboard::Calendar:
-            create_calendar_dashboard();
-            break;
-        case Dashboard::Chores:
-            create_chores_dashboard();
-            break;
-        case Dashboard::Meals:
-            create_meals_dashboard();
-            break;
-        case Dashboard::Weather:
-            create_weather_dashboard();
-            break;
-        case Dashboard::Alarm:
-            create_alarm_dashboard();
-            break;
-        case Dashboard::Settings:
-            create_home_dashboard();
-            break;
-    }
-
+    build_dashboard_page(g_dashboard);
+    show_only_dashboard(g_dashboard);
+    update_shell_dashboard_state();
     update_clock();
-    lv_obj_invalidate(g_screen);
+
+    if (g_root_screen) lv_obj_invalidate(g_root_screen);
 }
 
 } // namespace
 
 void calendar_ui_init() {
-    g_screen = lv_screen_active();
+    g_root_screen = lv_screen_active();
+    g_screen = g_root_screen;
     lv_obj_remove_flag(g_screen, LV_OBJ_FLAG_SCROLLABLE);
 
     g_ui_preferences_ready = g_ui_preferences.begin("famcal_ui", false);
@@ -3044,10 +3257,11 @@ void calendar_ui_init() {
     board_set_display_awake(true, g_backlight);
     g_last_user_activity_ms = millis();
 
-    /* Calendar is deliberately not persisted: it is always the boot/default dashboard. */
+    /* Calendar is deliberately not persisted as a preference: it remains the
+     * boot/default dashboard.  The v2 LVGL page itself is persistent once built. */
     g_dashboard = Dashboard::Calendar;
     g_dashboard_entered_ms = millis();
-    rebuild_ui();
+    rebuild_all_ui();
 }
 
 void calendar_ui_loop() {
@@ -3082,12 +3296,20 @@ void calendar_ui_loop() {
         board_set_display_awake(false, g_backlight);
     }
 
-    if (g_rebuild_pending && !g_overlay) {
-        rebuild_ui();
+    if (!g_overlay) {
+        if (g_full_rebuild_pending) {
+            rebuild_all_ui();
+        } else {
+            const size_t active_index = dashboard_index(g_dashboard);
+            const bool active_dirty =
+                active_index < DASHBOARD_COUNT && g_page_dirty[active_index];
+            if (g_rebuild_pending || active_dirty) rebuild_ui();
+        }
     }
 
-    if (chore_service_loop() && g_dashboard == Dashboard::Chores) {
-        request_rebuild();
+    if (chore_service_loop()) {
+        mark_dashboard_dirty(Dashboard::Chores);
+        if (g_dashboard == Dashboard::Chores) request_rebuild();
     }
 
     if (now - g_last_clock_update >= 1000UL) {
@@ -3101,41 +3323,62 @@ void calendar_ui_loop() {
         g_last_status_update = now;
         update_wifi_header();
         if (g_status_label) set_label_text(g_status_label, home_assistant_status());
-        update_home_dashboard();
+        if (g_dashboard == Dashboard::Settings) update_home_dashboard();
     }
 }
 
 void calendar_ui_refresh(uint32_t change_flags) {
-    if (g_dashboard == Dashboard::Calendar &&
-        (change_flags & (HA_CHANGE_CALENDAR | HA_CHANGE_WEATHER))) {
-        render_week();
+    if (change_flags & (HA_CHANGE_CALENDAR | HA_CHANGE_WEATHER)) {
+        mark_dashboard_dirty(Dashboard::Calendar);
+        if (g_dashboard == Dashboard::Calendar && !g_overlay) {
+            /* Calendar already owns a reusable seven-column surface, so update
+             * it in place instead of rebuilding the page. */
+            render_week();
+            g_page_dirty[dashboard_index(Dashboard::Calendar)] = false;
+        }
     }
-    if (g_dashboard == Dashboard::Meals && (change_flags & HA_CHANGE_CALENDAR)) {
-        request_rebuild();
+
+    if (change_flags & HA_CHANGE_CALENDAR) {
+        mark_dashboard_dirty(Dashboard::Meals);
+        if (g_dashboard == Dashboard::Meals) request_rebuild();
     }
-    if (g_dashboard == Dashboard::Weather && (change_flags & HA_CHANGE_WEATHER)) {
-        request_rebuild();
+
+    if (change_flags & HA_CHANGE_WEATHER) {
+        mark_dashboard_dirty(Dashboard::Weather);
+        if (g_dashboard == Dashboard::Weather) request_rebuild();
     }
-    if (g_dashboard == Dashboard::Chores &&
-        (change_flags & (HA_CHANGE_CHORES | HA_CHANGE_TODO_LISTS))) {
-        request_rebuild();
+
+    if (change_flags & (HA_CHANGE_CHORES | HA_CHANGE_TODO_LISTS)) {
+        mark_dashboard_dirty(Dashboard::Chores);
+        if (g_dashboard == Dashboard::Chores) request_rebuild();
     }
-    if (g_dashboard == Dashboard::Alarm &&
-        (change_flags & (HA_CHANGE_ALARM | HA_CHANGE_ALARM_PANELS))) {
-        request_rebuild();
+
+    if (change_flags & (HA_CHANGE_ALARM | HA_CHANGE_ALARM_PANELS)) {
+        mark_dashboard_dirty(Dashboard::Alarm);
+        if (g_dashboard == Dashboard::Alarm) request_rebuild();
     }
-    if (g_dashboard == Dashboard::Settings && change_flags != HA_CHANGE_NONE) {
-        update_home_dashboard();
+
+    if (change_flags != HA_CHANGE_NONE) {
+        mark_dashboard_dirty(Dashboard::Settings);
+        if (g_dashboard == Dashboard::Settings && !g_overlay) {
+            update_home_dashboard();
+            g_page_dirty[dashboard_index(Dashboard::Settings)] = false;
+        }
     }
 }
 
 void calendar_ui_wake_refresh(uint32_t change_flags) {
+    if (change_flags & (CAMERA_CHANGE_WAKE_SENSORS | CAMERA_CHANGE_WAKE_STATE)) {
+        mark_dashboard_dirty(Dashboard::Settings);
+    }
+
     if (g_dashboard == Dashboard::Settings &&
         (change_flags & (CAMERA_CHANGE_WAKE_SENSORS | CAMERA_CHANGE_WAKE_STATE))) {
         if (g_wake_sensor_picker_open && (change_flags & CAMERA_CHANGE_WAKE_SENSORS)) {
             show_wake_sensor_picker();
         } else {
             update_home_dashboard();
+            g_page_dirty[dashboard_index(Dashboard::Settings)] = false;
         }
     }
 }

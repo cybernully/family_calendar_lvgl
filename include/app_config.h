@@ -1,7 +1,7 @@
 #pragma once
 
 #define APP_NAME "Family Hub"
-#define APP_VERSION "1.7.1"
+#define APP_VERSION "2.0.1"
 
 /* JC8012P4A1C native panel is portrait; 90 degrees gives 1280x800 landscape. */
 #define APP_DISPLAY_ROTATION 90

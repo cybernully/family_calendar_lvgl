@@ -48,9 +48,15 @@ void alarm_service_clear() {
     alarm_service_set_entity("");
 }
 
-void alarm_service_replace(const AlarmoSnapshot &snapshot) {
-    if (snapshot.entity_id[0] && strcmp(snapshot.entity_id, g_entity_id) != 0) return;
+bool alarm_service_replace(const AlarmoSnapshot &snapshot) {
+    if (snapshot.entity_id[0] && strcmp(snapshot.entity_id, g_entity_id) != 0) return false;
+
+    /* Alarm snapshots are zero-initialized before parsing, so a byte comparison
+     * is stable and lets the 1-second Alarm poll avoid needless LVGL refreshes. */
+    if (memcmp(&g_snapshot, &snapshot, sizeof(g_snapshot)) == 0) return false;
+
     g_snapshot = snapshot;
+    return true;
 }
 
 const AlarmoSnapshot *alarm_service_snapshot() {

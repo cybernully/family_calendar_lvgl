@@ -35,7 +35,7 @@ const char *alarm_service_entity();
 void alarm_service_set_entity(const char *entity_id);
 void alarm_service_clear();
 
-void alarm_service_replace(const AlarmoSnapshot &snapshot);
+bool alarm_service_replace(const AlarmoSnapshot &snapshot);
 const AlarmoSnapshot *alarm_service_snapshot();
 
 const char *alarm_service_state();
