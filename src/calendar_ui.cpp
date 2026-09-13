@@ -1716,16 +1716,31 @@ void create_weather_daily_card(lv_obj_t *parent,
         snprintf(day_name, sizeof(day_name), "%s", short_days[day_tm.tm_wday]);
     }
 
-    weather_centered_label(card, day_name, &lv_font_montserrat_18, theme().text, w, w - 16, 8);
+    // Stronger visual hierarchy: larger day name and weather icon.
+    weather_centered_label(card, day_name, &lv_font_montserrat_20, theme().text, w, w - 16, 7);
 
+    constexpr int DAILY_ICON_SIZE = 58;
     lv_obj_t *icon = create_weather_icon(card,
                                          day.condition,
-                                         52,
+                                         DAILY_ICON_SIZE,
                                          theme().text,
                                          theme().accent,
                                          day.symbol_code);
-    if (icon) lv_obj_set_pos(icon, (w - 52) / 2, 34);
+    if (icon) lv_obj_set_pos(icon, (w - DAILY_ICON_SIZE) / 2, 31);
 
+    // Keep the condition secondary so the temperatures remain the main data.
+    lv_obj_t *condition = weather_centered_label(card,
+                                                  weather_condition_label(day.condition),
+                                                  &lv_font_montserrat_12,
+                                                  theme().muted,
+                                                  w,
+                                                  w - 16,
+                                                  93);
+    if (condition) lv_label_set_long_mode(condition, LV_LABEL_LONG_DOT);
+
+    // Keep high/low in one label so the daily card uses the same LVGL object
+    // count as the known-stable version.  The larger font and accent color
+    // preserve the visual hierarchy without adding extra child objects.
     char temps[32];
     if (isfinite(day.high_c) && isfinite(day.low_c)) {
         snprintf(temps, sizeof(temps), "%d / %d %s",
@@ -1735,16 +1750,13 @@ void create_weather_daily_card(lv_obj_t *parent,
     } else {
         snprintf(temps, sizeof(temps), "-- / -- %s", weather_temperature_unit());
     }
-    weather_centered_label(card, temps, &lv_font_montserrat_18, theme().text, w, w - 12, 91);
-
-    lv_obj_t *condition = weather_centered_label(card,
-                                                  weather_condition_label(day.condition),
-                                                  &lv_font_montserrat_12,
-                                                  theme().muted,
-                                                  w,
-                                                  w - 16,
-                                                  120);
-    if (condition) lv_label_set_long_mode(condition, LV_LABEL_LONG_DOT);
+    weather_centered_label(card,
+                           temps,
+                           &lv_font_montserrat_20,
+                           accent,
+                           w,
+                           w - 12,
+                           116);
 }
 
 void create_weather_hourly_card(lv_obj_t *parent,
