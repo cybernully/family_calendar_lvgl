@@ -1,7 +1,7 @@
 #pragma once
 
 #define APP_NAME "Family Hub"
-#define APP_VERSION "2.1.0"
+#define APP_VERSION "2.2.0"
 
 /* JC8012P4A1C native panel is portrait; 90 degrees gives 1280x800 landscape. */
 #define APP_DISPLAY_ROTATION 90
@@ -18,6 +18,24 @@
  */
 #if __has_include("app_local.h")
 #include "app_local.h"
+#endif
+
+/*
+ * v2.2.0 local web management / OTA defaults.  These can be overridden in
+ * app_local.h.  The web UI stores hostname/admin/UI-setting overrides in NVS,
+ * so firmware updates do not erase them.
+ */
+#ifndef WEB_MANAGER_HOSTNAME
+#define WEB_MANAGER_HOSTNAME "family-calendar"
+#endif
+#ifndef WEB_MANAGER_PORT
+#define WEB_MANAGER_PORT 80
+#endif
+#ifndef WEB_MANAGER_DEFAULT_USER
+#define WEB_MANAGER_DEFAULT_USER "admin"
+#endif
+#ifndef WEB_MANAGER_DEFAULT_PASSWORD
+#define WEB_MANAGER_DEFAULT_PASSWORD "familyhub"
 #endif
 
 #ifndef PERSON_1_NAME
@@ -110,7 +128,7 @@
 #define HA_HTTP_CONNECT_TIMEOUT_MS 2000
 #define HA_HTTP_TIMEOUT_MS 2500
 #define HA_HTTP_SERIALIZE_TIMEOUT_MS 10000UL
-#define HA_HTTP_INTER_REQUEST_GAP_MS 25UL
+#define HA_HTTP_INTER_REQUEST_GAP_MS 1000UL
 
 /*
  * HA HTTP/JSON work runs in the background at idle priority.  This is

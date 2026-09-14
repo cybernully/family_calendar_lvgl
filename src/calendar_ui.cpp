@@ -10,6 +10,7 @@
 #include "network_service.h"
 #include "weather_service.h"
 #include "weather_icons.h"
+#include "web_manager.h"
 #include "ui_fonts.h"
 #include "ui_symbols.h"
 
@@ -1534,8 +1535,10 @@ void update_chores_dashboard() {
     if (picker_mode) {
         lv_obj_remove_flag(g_chore_picker, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(g_chore_main, LV_OBJ_FLAG_HIDDEN);
-        home_assistant_request_todo_discovery();
 
+        /* Rendering is deliberately network-free.  Discovery is scheduled by
+         * service_active_dashboard_auto_refresh() only after this page has had
+         * time to reach the display. */
         if (chore_service_configured()) lv_obj_remove_flag(g_chore_picker_back, LV_OBJ_FLAG_HIDDEN);
         else lv_obj_add_flag(g_chore_picker_back, LV_OBJ_FLAG_HIDDEN);
 
@@ -1983,13 +1986,10 @@ void update_weather_dashboard() {
         return;
     }
 
-    if (!weather.has_data && !weather.in_progress) {
-        weather_service_request_refresh(false, "weather tab open");
-    }
     if (!weather.has_data) {
         lv_obj_add_flag(g_weather_widgets.content, LV_OBJ_FLAG_HIDDEN);
         set_label_text(g_weather_widgets.message,
-                       weather.in_progress ? "Loading weather snapshot..." : "Weather refresh queued...");
+                       weather.in_progress ? "Loading weather snapshot..." : "Weather refresh will start after the page settles...");
         lv_obj_remove_flag(g_weather_widgets.message, LV_OBJ_FLAG_HIDDEN);
         return;
     }
@@ -2542,7 +2542,9 @@ void update_alarm_dashboard() {
         lv_obj_remove_flag(g_alarm_widgets.picker, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(g_alarm_widgets.loading, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(g_alarm_widgets.main, LV_OBJ_FLAG_HIDDEN);
-        home_assistant_request_alarm_discovery();
+
+        /* Keep widget updates local.  Alarm-panel discovery is started only
+         * after the rendered page has had the normal tab-settle interval. */
         if (alarm_service_configured()) lv_obj_remove_flag(g_alarm_widgets.picker_back, LV_OBJ_FLAG_HIDDEN);
         else lv_obj_add_flag(g_alarm_widgets.picker_back, LV_OBJ_FLAG_HIDDEN);
 
@@ -2579,7 +2581,6 @@ void update_alarm_dashboard() {
     if (!snapshot || !snapshot->valid) {
         lv_obj_remove_flag(g_alarm_widgets.loading, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(g_alarm_widgets.main, LV_OBJ_FLAG_HIDDEN);
-        home_assistant_request_alarm_sync();
         return;
     }
 
@@ -3097,7 +3098,7 @@ void build_dashboard_page(Dashboard dashboard) {
     update_dashboard_page(dashboard);
 
     ESP_LOGI("FamilyCalendar",
-             "[UI v2.1] Created persistent %s page; free heap=%u, free PSRAM=%u",
+             "[UI v2.2.0] Created persistent %s page; free heap=%u, free PSRAM=%u",
              dashboard_name(dashboard),
              static_cast<unsigned>(ESP.getFreeHeap()),
              static_cast<unsigned>(ESP.getFreePsram()));
@@ -3121,13 +3122,11 @@ void activate_dashboard(Dashboard dashboard) {
     if (index >= DASHBOARD_COUNT) return;
 
     const bool changed = dashboard != g_dashboard;
-    if (changed) {
-        g_dashboard = dashboard;
-        g_dashboard_entered_ms = millis();
-    }
+    if (changed) g_dashboard = dashboard;
 
-    /* Build the object tree only once.  A dirty page means its model changed
-     * while hidden, so refresh its existing widgets before making it visible. */
+    /* UI-first navigation: update cached/local data, reveal the persistent
+     * page, and invalidate it before starting the active-tab network settle
+     * timer.  Normal tab changes therefore never wait on Home Assistant. */
     if (!g_page_built[index]) {
         build_dashboard_page(dashboard);
     } else if (g_page_dirty[index]) {
@@ -3139,6 +3138,14 @@ void activate_dashboard(Dashboard dashboard) {
     g_rebuild_pending = false;
 
     if (g_root_screen) lv_obj_invalidate(g_root_screen);
+
+    if (changed) {
+        g_dashboard_entered_ms = millis();
+        ESP_LOGI("FamilyCalendar",
+                 "[UI v2.2.0] %s visible from cached state; HA refresh eligible after %lums",
+                 dashboard_name(dashboard),
+                 static_cast<unsigned long>(HA_ACTIVE_TAB_SETTLE_MS));
+    }
 }
 
 void rebuild_all_ui() {
@@ -3156,14 +3163,21 @@ void rebuild_all_ui() {
     create_header();
     create_footer();
 
-    build_dashboard_page(g_dashboard);
+    /* Build every persistent page before the network stack is started at boot.
+     * This removes first-visit allocation/render spikes from normal navigation.
+     * Theme changes intentionally rebuild the same complete persistent set. */
+    for (size_t i = 0; i < DASHBOARD_COUNT; ++i) {
+        build_dashboard_page(static_cast<Dashboard>(i));
+    }
+
     show_only_dashboard(g_dashboard);
     update_shell_dashboard_state();
     update_clock();
 
     lv_obj_invalidate(g_screen);
+    g_dashboard_entered_ms = millis();
     ESP_LOGI("FamilyCalendar",
-             "[UI v2] Persistent shell ready; free heap=%u, free PSRAM=%u",
+             "[UI v2.2.0] Persistent shell and all pages ready; free heap=%u, free PSRAM=%u",
              static_cast<unsigned>(ESP.getFreeHeap()),
              static_cast<unsigned>(ESP.getFreePsram()));
 }
@@ -3176,6 +3190,10 @@ bool auto_refresh_due(uint32_t now, uint32_t last_attempt_ms, uint32_t last_ui_r
 }
 
 void service_active_dashboard_auto_refresh(uint32_t now) {
+    /* Web maintenance mode lets the current HA worker drain but prevents the
+     * UI from queuing any new automatic network work before an OTA upload. */
+    if (web_manager_maintenance_active()) return;
+
     /* The display being asleep is a strong signal that nobody is looking at
      * the dashboard, so do not spend ESP-Hosted/TLS traffic refreshing it. */
     if (!board_display_awake()) return;
@@ -3207,6 +3225,10 @@ void service_active_dashboard_auto_refresh(uint32_t now) {
                 g_last_calendar_auto_request_ms = now;
                 ESP_LOGI("FamilyCalendar", "Active-tab auto refresh: %s calendar data", dashboard_name(g_dashboard));
                 home_assistant_request_sync();
+                /* Queue only one HA domain per UI pass.  Weather can be queued
+                 * after the calendar worker returns idle instead of being
+                 * stacked behind the same request burst. */
+                return;
             }
             if (weather_service_should_refresh(now) &&
                 auto_refresh_due(now,
@@ -3231,7 +3253,13 @@ void service_active_dashboard_auto_refresh(uint32_t now) {
             break;
 
         case Dashboard::Chores:
-            if (!chore_service_configured() || g_chore_choose_list) break;
+            if (!chore_service_configured() || g_chore_choose_list) {
+                if (!home_assistant_todo_lists_ready()) {
+                    ESP_LOGI("FamilyCalendar", "Post-render refresh: discover Home Assistant chore lists");
+                    home_assistant_request_todo_discovery();
+                }
+                break;
+            }
             if (auto_refresh_due(now,
                                  home_assistant_last_chore_request_ms(),
                                  g_last_chore_auto_request_ms,
@@ -3243,7 +3271,13 @@ void service_active_dashboard_auto_refresh(uint32_t now) {
             break;
 
         case Dashboard::Alarm:
-            if (!alarm_service_configured() || g_alarm_choose_panel) break;
+            if (!alarm_service_configured() || g_alarm_choose_panel) {
+                if (!home_assistant_alarm_panels_ready()) {
+                    ESP_LOGI("FamilyCalendar", "Post-render refresh: discover Alarmo panels");
+                    home_assistant_request_alarm_discovery();
+                }
+                break;
+            }
             if (auto_refresh_due(now,
                                  home_assistant_last_alarm_request_ms(),
                                  g_last_alarm_auto_request_ms,

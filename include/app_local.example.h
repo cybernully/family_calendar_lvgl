@@ -34,6 +34,12 @@
  */
 #define APP_SCREEN_TIMEOUT_SECONDS 120U
 
+/* Optional local web-management defaults.  Once changed from the web UI, the
+ * NVS values take precedence and survive future firmware updates. */
+// #define WEB_MANAGER_HOSTNAME "family-calendar"
+// #define WEB_MANAGER_DEFAULT_USER "admin"
+// #define WEB_MANAGER_DEFAULT_PASSWORD "choose-a-strong-password"
+
 /* Legacy/local chore labels retained for compatibility. */
 #define CHORE_1_NAME "Feed pets"
 #define CHORE_2_NAME "Dishwasher"

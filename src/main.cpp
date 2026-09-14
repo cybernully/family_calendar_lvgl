@@ -10,6 +10,7 @@
 #include "network_service.h"
 #include "home_assistant.h"
 #include "weather_service.h"
+#include "web_manager.h"
 
 void setup() {
     Serial0.begin(115200);
@@ -33,6 +34,7 @@ void setup() {
     /* Initialize ESP-Hosted first.  Camera feeds and HA presence polling are
      * disabled in network-safe mode; touch-to-wake remains local. */
     network_service_begin();
+    web_manager_begin();
     camera_service_begin();
     home_assistant_begin();
     weather_service_request_refresh(false, "startup");
@@ -42,7 +44,14 @@ void setup() {
 
 void loop() {
     network_service_loop();
-    home_assistant_loop(calendar_ui_week_offset());
+    web_manager_loop();
+
+    /* Maintenance mode suppresses new UI-driven refreshes, but the HA loop is
+     * allowed to drain queued work.  Only the actual flash upload blocks HA
+     * scheduling completely. */
+    if (!web_manager_ota_in_progress()) {
+        home_assistant_loop(calendar_ui_week_offset());
+    }
 
     const uint32_t ha_changes = home_assistant_take_changes();
     if (ha_changes != HA_CHANGE_NONE) {
