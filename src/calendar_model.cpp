@@ -8,11 +8,21 @@
 #include <string.h>
 #include <stdlib.h>
 
+/**
+ * Colors
+ * Green - 0x22C55E
+ * Blue  - 0x3B82F6
+ * Purple- 0xA855F7
+ * Orange- 0xF59E0B
+ * Red   - 0xEF4444
+ * 
+ */
+
 const CalendarPerson CALENDAR_PEOPLE[4] = {
-    {PERSON_1_NAME, 0x3B82F6},
-    {PERSON_2_NAME, 0xA855F7},
-    {PERSON_3_NAME, 0x22C55E},
-    {PERSON_4_NAME, 0xF59E0B},
+    {PERSON_1_NAME, 0x22C55E},
+    {PERSON_2_NAME, 0x2596BE},
+    {PERSON_3_NAME, 0xF06292},
+    {PERSON_4_NAME, 0xBA68C8},
 };
 
 CalendarEvent CALENDAR_EVENTS[HA_MAX_EVENTS] = {};

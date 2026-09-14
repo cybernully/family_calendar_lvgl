@@ -9,6 +9,7 @@
 #include "home_assistant.h"
 #include "network_service.h"
 #include "weather_service.h"
+#include "weather_icons.h"
 #include "ui_fonts.h"
 #include "ui_symbols.h"
 
@@ -104,6 +105,128 @@ lv_obj_t *g_nav_buttons[DASHBOARD_COUNT] = {};
 lv_obj_t *g_nav_icons[DASHBOARD_COUNT] = {};
 lv_obj_t *g_nav_captions[DASHBOARD_COUNT] = {};
 
+struct CalendarEventWidget {
+    lv_obj_t *card = nullptr;
+    lv_obj_t *time_label = nullptr;
+    lv_obj_t *title_label = nullptr;
+    const CalendarEvent *event = nullptr;
+};
+
+struct CalendarDayWidgets {
+    lv_obj_t *day_name = nullptr;
+    lv_obj_t *day_number = nullptr;
+    lv_obj_t *weather_row = nullptr;
+    lv_obj_t *weather_icon = nullptr;
+    lv_obj_t *weather_temp = nullptr;
+    lv_obj_t *empty_label = nullptr;
+    lv_obj_t *more_label = nullptr;
+    CalendarEventWidget events[MAX_VISIBLE_EVENTS_PER_DAY];
+};
+
+struct ChoreCardWidgets {
+    lv_obj_t *card = nullptr;
+    lv_obj_t *task = nullptr;
+    lv_obj_t *hint = nullptr;
+};
+
+struct PickerCardWidgets {
+    lv_obj_t *card = nullptr;
+    lv_obj_t *name = nullptr;
+    lv_obj_t *entity = nullptr;
+};
+
+struct MealDayWidgets {
+    lv_obj_t *card = nullptr;
+    lv_obj_t *heading = nullptr;
+    lv_obj_t *meal_lines[3] = {};
+    lv_obj_t *empty = nullptr;
+    lv_obj_t *hint = nullptr;
+    const CalendarEvent *first_event = nullptr;
+};
+
+struct WeatherMetricWidgets {
+    lv_obj_t *value = nullptr;
+};
+
+struct WeatherDailyWidgets {
+    lv_obj_t *card = nullptr;
+    lv_obj_t *accent = nullptr;
+    lv_obj_t *day = nullptr;
+    lv_obj_t *icon = nullptr;
+    lv_obj_t *condition = nullptr;
+    lv_obj_t *temps = nullptr;
+};
+
+struct WeatherHourlyWidgets {
+    lv_obj_t *card = nullptr;
+    lv_obj_t *accent = nullptr;
+    lv_obj_t *time = nullptr;
+    lv_obj_t *icon = nullptr;
+    lv_obj_t *temp = nullptr;
+    lv_obj_t *precip = nullptr;
+};
+
+struct WeatherWidgets {
+    lv_obj_t *page = nullptr;
+    lv_obj_t *updated = nullptr;
+    lv_obj_t *message = nullptr;
+    lv_obj_t *content = nullptr;
+    lv_obj_t *hero_accent = nullptr;
+    lv_obj_t *hero_icon = nullptr;
+    lv_obj_t *hero_temp = nullptr;
+    lv_obj_t *hero_condition = nullptr;
+    lv_obj_t *hero_range = nullptr;
+    WeatherMetricWidgets metrics[4];
+    lv_obj_t *daily_heading = nullptr;
+    WeatherDailyWidgets daily[6];
+    lv_obj_t *hourly_heading = nullptr;
+    WeatherHourlyWidgets hourly[18];
+};
+
+struct AlarmWidgets {
+    lv_obj_t *page = nullptr;
+    lv_obj_t *picker = nullptr;
+    lv_obj_t *picker_back = nullptr;
+    lv_obj_t *picker_status = nullptr;
+    PickerCardWidgets picker_cards[HA_MAX_ALARM_PANELS];
+    lv_obj_t *loading = nullptr;
+    lv_obj_t *main = nullptr;
+    lv_obj_t *state = nullptr;
+    lv_obj_t *next = nullptr;
+    lv_obj_t *sensors = nullptr;
+    lv_obj_t *last = nullptr;
+    lv_obj_t *code = nullptr;
+    lv_obj_t *entity = nullptr;
+    lv_obj_t *disarm = nullptr;
+    lv_obj_t *home = nullptr;
+    lv_obj_t *away = nullptr;
+    lv_obj_t *night = nullptr;
+    lv_obj_t *vacation = nullptr;
+    lv_obj_t *skip = nullptr;
+    lv_obj_t *skip_info = nullptr;
+};
+
+CalendarDayWidgets g_calendar_days[7] = {};
+ChoreCardWidgets g_chore_cards[HA_MAX_CHORES] = {};
+PickerCardWidgets g_chore_picker_cards[HA_MAX_TODO_LISTS] = {};
+MealDayWidgets g_meal_days[7] = {};
+WeatherWidgets g_weather_widgets = {};
+AlarmWidgets g_alarm_widgets = {};
+
+lv_obj_t *g_chore_page = nullptr;
+lv_obj_t *g_chore_main = nullptr;
+lv_obj_t *g_chore_picker = nullptr;
+lv_obj_t *g_chore_picker_status = nullptr;
+lv_obj_t *g_chore_picker_back = nullptr;
+lv_obj_t *g_chore_source = nullptr;
+lv_obj_t *g_chore_progress_label = nullptr;
+lv_obj_t *g_chore_progress = nullptr;
+lv_obj_t *g_chore_empty = nullptr;
+
+lv_obj_t *g_meals_page = nullptr;
+
+lv_obj_t *g_home_timeout_button_label = nullptr;
+
 lv_obj_t *g_home_network = nullptr;
 lv_obj_t *g_home_ha = nullptr;
 lv_obj_t *g_home_calendar = nullptr;
@@ -162,6 +285,11 @@ const char *screen_timeout_text(uint32_t seconds);
 const char *selected_wake_sensor_name();
 void activate_dashboard(Dashboard dashboard);
 void request_full_rebuild();
+void update_chores_dashboard();
+void update_meals_dashboard();
+void update_weather_dashboard();
+void update_alarm_dashboard();
+void update_dashboard_page(Dashboard dashboard);
 
 const ThemeColors &theme() {
     return g_dark_mode ? DARK : LIGHT;
@@ -368,140 +496,24 @@ static lv_obj_t *create_nav_button(lv_obj_t *parent,
     return btn;
 }
 
-lv_obj_t *create_weather_icon(lv_obj_t *parent,
-                              WeatherCondition condition,
-                              int size,
-                              uint32_t primary,
-                              uint32_t secondary,
-                              const char *symbol_code = nullptr) {
+lv_obj_t *create_weather_image(lv_obj_t *parent, int size) {
     if (!parent) return nullptr;
-    if (size < 20) size = 20;
+    lv_obj_t *image = lv_image_create(parent);
+    if (!image) return nullptr;
+    lv_obj_set_size(image, size, size);
+    lv_image_set_src(image, weather_icon_asset(WeatherCondition::Unknown));
+    lv_image_set_inner_align(image, LV_IMAGE_ALIGN_CONTAIN);
+    lv_image_set_antialias(image, true);
+    lv_obj_remove_flag(image, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(image, LV_OBJ_FLAG_SCROLLABLE);
+    return image;
+}
 
-    lv_obj_t *icon = lv_obj_create(parent);
-    if (!icon) return nullptr;
-    lv_obj_set_size(icon, size, size);
-    lv_obj_set_style_bg_opa(icon, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_border_width(icon, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(icon, 0, LV_PART_MAIN);
-    lv_obj_remove_flag(icon, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_remove_flag(icon, LV_OBJ_FLAG_CLICKABLE);
-
-    /*
-     * Condition-specific colors make the forecast readable at a glance.
-     * primary/secondary are retained for API compatibility and are used by
-     * the unknown-condition fallback.
-     */
-    const uint32_t sun = 0xF59E0B;
-    const uint32_t sun_bright = 0xFBBF24;
-    const uint32_t cloud = g_dark_mode ? 0xCBD5E1 : 0x94A3B8;
-    const uint32_t cloud_light = g_dark_mode ? 0xF1F5F9 : 0xCBD5E1;
-    const uint32_t cloud_dark = g_dark_mode ? 0x94A3B8 : 0x64748B;
-    const uint32_t rain = 0x3B82F6;
-    const uint32_t rain_light = 0x60A5FA;
-    const uint32_t lightning = 0xFACC15;
-    const uint32_t snow = 0x38BDF8;
-    const uint32_t fog = g_dark_mode ? 0xCBD5E1 : 0x94A3B8;
-
-    const int cloud_h = size / 4;
-    const int cloud_y = size / 2;
-
-    auto draw_sun = [&](int cx, int cy, int radius) {
-        const int diameter = radius * 2;
-        icon_piece(icon, cx - radius, cy - radius, diameter, diameter, sun_bright, radius);
-
-        const int ray = size >= 48 ? 3 : 2;
-        const int ray_len = size / 7;
-        icon_piece(icon, cx - ray / 2, cy - radius - ray_len - 2, ray, ray_len, sun, 1);
-        icon_piece(icon, cx - ray / 2, cy + radius + 2, ray, ray_len, sun, 1);
-        icon_piece(icon, cx - radius - ray_len - 2, cy - ray / 2, ray_len, ray, sun, 1);
-        icon_piece(icon, cx + radius + 2, cy - ray / 2, ray_len, ray, sun, 1);
-    };
-
-    auto draw_cloud = [&](uint32_t base, uint32_t highlight) {
-        const int body_x = size / 7;
-        const int body_w = size * 5 / 7;
-        const int body_y = cloud_y;
-        icon_piece(icon, body_x, body_y, body_w, cloud_h + 3, base, cloud_h / 2);
-        icon_piece(icon, size / 4, body_y - cloud_h / 2, cloud_h + 2, cloud_h + 2,
-                   highlight, (cloud_h + 2) / 2);
-        icon_piece(icon, size / 2 - cloud_h / 3, body_y - cloud_h / 2 - 4,
-                   cloud_h + 5, cloud_h + 5, base, (cloud_h + 5) / 2);
-        icon_piece(icon, size / 2 + cloud_h / 3, body_y - cloud_h / 3,
-                   cloud_h, cloud_h, highlight, cloud_h / 2);
-    };
-
-    if (symbol_code && strcmp(symbol_code, "clear-night") == 0) {
-        const uint32_t moon = 0xFDE68A;
-        const uint32_t mask = theme().panel_alt;
-        const int radius = size / 5;
-        const int cx = size / 2;
-        const int cy = size / 2;
-        icon_piece(icon, cx - radius, cy - radius, radius * 2, radius * 2, moon, radius);
-        icon_piece(icon, cx - radius / 3, cy - radius - 2, radius * 2, radius * 2, mask, radius);
-        return icon;
-    }
-
-    switch (condition) {
-        case WeatherCondition::Clear:
-            draw_sun(size / 2, size / 2, size / 5);
-            break;
-
-        case WeatherCondition::PartlyCloudy:
-            draw_sun(size / 3, size / 3, size / 7);
-            draw_cloud(cloud, cloud_light);
-            break;
-
-        case WeatherCondition::Cloudy:
-            icon_piece(icon, size / 8, size / 3, size / 2, cloud_h + 2,
-                       cloud_dark, cloud_h / 2);
-            icon_piece(icon, size / 5, size / 4, cloud_h + 2, cloud_h + 2,
-                       cloud_light, (cloud_h + 2) / 2);
-            draw_cloud(cloud, cloud_light);
-            break;
-
-        case WeatherCondition::Rain:
-        case WeatherCondition::Showers:
-            draw_cloud(cloud, cloud_light);
-            icon_piece(icon, size / 4, cloud_y + cloud_h + 3, 3, size / 5, rain, 1);
-            icon_piece(icon, size / 2, cloud_y + cloud_h + 5, 3, size / 5, rain_light, 1);
-            icon_piece(icon, size * 3 / 4 - 3, cloud_y + cloud_h + 3, 3, size / 5, rain, 1);
-            break;
-
-        case WeatherCondition::Thunderstorm:
-            draw_cloud(cloud_dark, cloud);
-            icon_piece(icon, size / 2 - 3, cloud_y + cloud_h + 1, size / 5, 4, lightning, 1);
-            icon_piece(icon, size / 2 + size / 10 - 3, cloud_y + cloud_h + 4, 4, size / 6,
-                       lightning, 1);
-            icon_piece(icon, size / 2 + size / 10 - 2,
-                       cloud_y + cloud_h + size / 6 + 2,
-                       size / 6, 4, lightning, 1);
-            break;
-
-        case WeatherCondition::Snow:
-            draw_cloud(cloud, cloud_light);
-            for (int i = 0; i < 3; ++i) {
-                const int x = size / 4 + i * size / 4;
-                const int y = cloud_y + cloud_h + 6 + ((i % 2) ? 4 : 0);
-                icon_piece(icon, x - 2, y, 5, 2, snow, 1);
-                icon_piece(icon, x, y - 2, 2, 5, snow, 1);
-            }
-            break;
-
-        case WeatherCondition::Fog:
-            draw_cloud(cloud, cloud_light);
-            icon_piece(icon, size / 7, size * 3 / 4, size * 5 / 7, 2, fog, 1);
-            icon_piece(icon, size / 5, size * 3 / 4 + 6, size * 3 / 5, 2, fog, 1);
-            break;
-
-        case WeatherCondition::Unknown:
-        default:
-            draw_sun(size / 2, size / 2, size / 6);
-            icon_piece(icon, size / 2 - 1, size / 2 - 1, 3, 3,
-                       primary ? primary : secondary, 1);
-            break;
-    }
-
-    return icon;
+void set_weather_image(lv_obj_t *image,
+                       WeatherCondition condition,
+                       const char *symbol_code = nullptr) {
+    if (!image) return;
+    lv_image_set_src(image, weather_icon_asset(condition, symbol_code));
 }
 
 const char *wind_direction_text(float degrees) {
@@ -895,30 +907,74 @@ void create_footer() {
     }
 }
 
-void add_event_card(lv_obj_t *column, const CalendarEvent *event, int slot) {
-    lv_obj_t *card = lv_button_create(column);
-    lv_obj_set_size(card, DAY_W - 12, EVENT_CARD_H);
-    lv_obj_set_pos(card, 6, DAY_HEADER_H + slot * EVENT_CARD_STEP);
-    style_box(card, CALENDAR_PEOPLE[event->person].color, 9, 0);
-    lv_obj_set_style_bg_opa(card, LV_OPA_90, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(card, 7, LV_PART_MAIN);
+void calendar_event_slot_clicked_cb(lv_event_t *e) {
+    auto *slot = static_cast<CalendarEventWidget *>(lv_event_get_user_data(e));
+    if (!slot || !slot->event) return;
+    show_event_details_overlay(*slot->event);
+}
 
-    char time_text[22];
-    calendar_format_event_time(*event, time_text, sizeof(time_text));
+void create_calendar_day_widgets(lv_obj_t *column, int day) {
+    if (!column || day < 0 || day >= 7) return;
+    CalendarDayWidgets &widgets = g_calendar_days[day];
 
-    lv_obj_t *time_label = label(card, time_text, &lv_font_montserrat_12, 0xFFFFFF, DAY_W - 28);
-    lv_obj_set_pos(time_label, 0, -1);
+    widgets.day_name = label(column, calendar_day_name(day), &lv_font_montserrat_14,
+                             theme().muted, DAY_W - 12);
+    if (widgets.day_name) {
+        lv_obj_set_style_text_align(widgets.day_name, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+        lv_obj_set_pos(widgets.day_name, 6, 5);
+    }
 
-    lv_obj_t *title_label = label(card, event->title, &lv_font_montserrat_14, 0xFFFFFF, DAY_W - 28);
-    lv_label_set_long_mode(title_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_height(title_label, 44);
-    lv_obj_set_pos(title_label, 0, 23);
+    widgets.day_number = label(column, "--", &lv_font_montserrat_24, theme().text);
+    if (widgets.day_number) lv_obj_align(widgets.day_number, LV_ALIGN_TOP_MID, 0, 24);
 
-    lv_obj_add_event_cb(card, event_clicked_cb, LV_EVENT_CLICKED, const_cast<CalendarEvent *>(event));
+    constexpr int WEATHER_ROW_W = 100;
+    constexpr int WEATHER_ROW_H = 34;
+    widgets.weather_row = lv_obj_create(column);
+    lv_obj_set_size(widgets.weather_row, WEATHER_ROW_W, WEATHER_ROW_H);
+    lv_obj_align(widgets.weather_row, LV_ALIGN_TOP_MID, 0, 49);
+    lv_obj_set_style_bg_opa(widgets.weather_row, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(widgets.weather_row, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(widgets.weather_row, 0, LV_PART_MAIN);
+    lv_obj_remove_flag(widgets.weather_row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(widgets.weather_row, LV_OBJ_FLAG_CLICKABLE);
+
+    widgets.weather_icon = create_weather_image(widgets.weather_row, 32);
+    set_pos_if(widgets.weather_icon, 1, 1);
+    widgets.weather_temp = label(widgets.weather_row, "--/--", &lv_font_montserrat_14,
+                                 theme().text, 62);
+    if (widgets.weather_temp) {
+        lv_obj_set_style_text_align(widgets.weather_temp, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+        lv_obj_set_pos(widgets.weather_temp, 38, 8);
+    }
+
+    widgets.empty_label = label(column, "No events", &lv_font_montserrat_12, theme().muted);
+    if (widgets.empty_label) lv_obj_align(widgets.empty_label, LV_ALIGN_TOP_MID, 0, DAY_HEADER_H + 10);
+
+    widgets.more_label = label(column, "", &lv_font_montserrat_12, theme().muted);
+    if (widgets.more_label) lv_obj_align(widgets.more_label, LV_ALIGN_BOTTOM_MID, 0, -6);
+
+    for (int slot_index = 0; slot_index < MAX_VISIBLE_EVENTS_PER_DAY; ++slot_index) {
+        CalendarEventWidget &slot = widgets.events[slot_index];
+        slot.card = lv_button_create(column);
+        lv_obj_set_size(slot.card, DAY_W - 12, EVENT_CARD_H);
+        lv_obj_set_pos(slot.card, 6, DAY_HEADER_H + slot_index * EVENT_CARD_STEP);
+        style_box(slot.card, theme().accent, 9, 0);
+        lv_obj_set_style_bg_opa(slot.card, LV_OPA_90, LV_PART_MAIN);
+        lv_obj_set_style_pad_all(slot.card, 7, LV_PART_MAIN);
+
+        slot.time_label = label(slot.card, "", &lv_font_montserrat_12, 0xFFFFFF, DAY_W - 28);
+        lv_obj_set_pos(slot.time_label, 0, -1);
+        slot.title_label = label(slot.card, "", &lv_font_montserrat_14, 0xFFFFFF, DAY_W - 28);
+        lv_label_set_long_mode(slot.title_label, LV_LABEL_LONG_WRAP);
+        lv_obj_set_height(slot.title_label, 44);
+        lv_obj_set_pos(slot.title_label, 0, 23);
+        lv_obj_add_event_cb(slot.card, calendar_event_slot_clicked_cb, LV_EVENT_CLICKED, &slot);
+        lv_obj_add_flag(slot.card, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 void render_week() {
-    if (g_dashboard != Dashboard::Calendar || !g_week_label) return;
+    if (!g_week_label) return;
 
     const time_t now = time_service_now();
     time_t week_start = time_service_start_of_week(now);
@@ -948,7 +1004,7 @@ void render_week() {
     for (int day = 0; day < 7; ++day) {
         lv_obj_t *column = g_day_columns[day];
         if (!column) continue;
-        lv_obj_clean(column);
+        CalendarDayWidgets &widgets = g_calendar_days[day];
 
         const time_t day_time = time_service_add_days(week_start, day);
         struct tm day_tm = {};
@@ -959,78 +1015,81 @@ void render_week() {
                                day_tm.tm_yday == now_tm.tm_yday);
 
         lv_obj_set_style_bg_color(column, lv_color_hex(is_today ? theme().today : theme().panel), LV_PART_MAIN);
-
-        /*
-         * Treat the day/date/weather as one header instead of bolting a tiny
-         * weather glyph onto the corner.  This keeps the forecast readable
-         * without sacrificing any of the six event-card slots below it.
-         */
-        lv_obj_t *day_name = label(column, calendar_day_name(day), &lv_font_montserrat_14,
-                                   is_today ? theme().accent : theme().muted, DAY_W - 12);
-        if (day_name) {
-            lv_obj_set_style_text_align(day_name, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-            lv_obj_set_pos(day_name, 6, 5);
+        set_label_text(widgets.day_name, calendar_day_name(day));
+        if (widgets.day_name) {
+            lv_obj_set_style_text_color(widgets.day_name,
+                                        lv_color_hex(is_today ? theme().accent : theme().muted),
+                                        LV_PART_MAIN);
         }
 
         char number[8];
         snprintf(number, sizeof(number), "%d", day_tm.tm_mday);
-        lv_obj_t *day_number = label(column, number, &lv_font_montserrat_24,
-                                     is_today ? theme().accent : theme().text);
-        lv_obj_align(day_number, LV_ALIGN_TOP_MID, 0, 24);
+        set_label_text(widgets.day_number, number);
+        if (widgets.day_number) {
+            lv_obj_set_style_text_color(widgets.day_number,
+                                        lv_color_hex(is_today ? theme().accent : theme().text),
+                                        LV_PART_MAIN);
+        }
 
         WeatherDayForecast day_weather = {};
         if (weather_service_get_day_forecast(day_time, day_weather) && day_weather.valid) {
-            constexpr int WEATHER_ROW_W = 100;
-            constexpr int WEATHER_ROW_H = 34;
-            lv_obj_t *weather_row = lv_obj_create(column);
-            lv_obj_set_size(weather_row, WEATHER_ROW_W, WEATHER_ROW_H);
-            lv_obj_align(weather_row, LV_ALIGN_TOP_MID, 0, 49);
-            lv_obj_set_style_bg_opa(weather_row, LV_OPA_TRANSP, LV_PART_MAIN);
-            lv_obj_set_style_border_width(weather_row, 0, LV_PART_MAIN);
-            lv_obj_set_style_pad_all(weather_row, 0, LV_PART_MAIN);
-            lv_obj_remove_flag(weather_row, LV_OBJ_FLAG_SCROLLABLE);
-            lv_obj_remove_flag(weather_row, LV_OBJ_FLAG_CLICKABLE);
-
-            lv_obj_t *icon = create_weather_icon(weather_row,
-                                                 day_weather.condition,
-                                                 34,
-                                                 theme().text,
-                                                 theme().accent);
-            set_pos_if(icon, 0, 0);
-
+            lv_obj_remove_flag(widgets.weather_row, LV_OBJ_FLAG_HIDDEN);
+            set_weather_image(widgets.weather_icon, day_weather.condition, day_weather.symbol_code);
             char temps[24];
             snprintf(temps, sizeof(temps), "%d/%d",
                      rounded_display_temp(day_weather.high_c),
                      rounded_display_temp(day_weather.low_c));
-            lv_obj_t *temp = label(weather_row, temps, &lv_font_montserrat_14,
-                                   is_today ? theme().accent : theme().text, 62);
-            if (temp) {
-                lv_obj_set_style_text_align(temp, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-                lv_obj_set_pos(temp, 38, 8);
+            set_label_text(widgets.weather_temp, temps);
+            if (widgets.weather_temp) {
+                lv_obj_set_style_text_color(widgets.weather_temp,
+                                            lv_color_hex(is_today ? theme().accent : theme().text),
+                                            LV_PART_MAIN);
             }
+        } else {
+            lv_obj_add_flag(widgets.weather_row, LV_OBJ_FLAG_HIDDEN);
         }
 
-        int slot = 0;
+        int slot_count = 0;
         int hidden = 0;
         for (size_t i = 0; i < CALENDAR_EVENT_COUNT; ++i) {
             const CalendarEvent &event = CALENDAR_EVENTS[i];
             if (!calendar_event_is_on_day(event, day_time)) continue;
             if (event.person >= 4 || !g_person_visible[event.person]) continue;
-            if (slot < MAX_VISIBLE_EVENTS_PER_DAY) {
-                add_event_card(column, &event, slot++);
+
+            if (slot_count < MAX_VISIBLE_EVENTS_PER_DAY) {
+                CalendarEventWidget &slot = widgets.events[slot_count++];
+                slot.event = &event;
+                char time_text[22];
+                calendar_format_event_time(event, time_text, sizeof(time_text));
+                set_label_text(slot.time_label, time_text);
+                set_label_text(slot.title_label, event.title);
+                lv_obj_set_style_bg_color(slot.card,
+                                          lv_color_hex(CALENDAR_PEOPLE[event.person].color),
+                                          LV_PART_MAIN);
+                lv_obj_remove_flag(slot.card, LV_OBJ_FLAG_HIDDEN);
             } else {
                 ++hidden;
             }
         }
 
-        if (slot == 0) {
-            lv_obj_t *empty = label(column, "No events", &lv_font_montserrat_12, theme().muted);
-            lv_obj_align(empty, LV_ALIGN_TOP_MID, 0, DAY_HEADER_H + 10);
-        } else if (hidden > 0) {
+        for (int slot = slot_count; slot < MAX_VISIBLE_EVENTS_PER_DAY; ++slot) {
+            widgets.events[slot].event = nullptr;
+            lv_obj_add_flag(widgets.events[slot].card, LV_OBJ_FLAG_HIDDEN);
+        }
+
+        if (slot_count == 0) {
+            lv_obj_remove_flag(widgets.empty_label, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(widgets.empty_label, LV_OBJ_FLAG_HIDDEN);
+        }
+
+        if (hidden > 0) {
             char more[24];
             snprintf(more, sizeof(more), "+%d more", hidden);
-            lv_obj_t *more_label = label(column, more, &lv_font_montserrat_12, theme().muted);
-            lv_obj_align(more_label, LV_ALIGN_BOTTOM_MID, 0, -6);
+            set_label_text(widgets.more_label, more);
+            lv_obj_remove_flag(widgets.more_label, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(widgets.more_label, LV_OBJ_FLAG_HIDDEN);
         }
     }
 
@@ -1038,44 +1097,18 @@ void render_week() {
 
     if (g_summary_label) {
         char summary[96];
-
         if (g_week_offset == 0) {
-            //
-            // Current week: show today's count and this week's total.
-            //
-            if (g_summary_title) {
-                set_label_text(g_summary_title, "TODAY");
-            }
-
-            const size_t today_events =
-                calendar_count_events_on_day(time_service_now());
-
-            snprintf(
-                summary,
-                sizeof(summary),
-                "%u event%s today\n%u total this week",
-                static_cast<unsigned>(today_events),
-                today_events == 1 ? "" : "s",
-                static_cast<unsigned>(CALENDAR_EVENT_COUNT)
-            );
+            if (g_summary_title) set_label_text(g_summary_title, "TODAY");
+            const size_t today_events = calendar_count_events_on_day(time_service_now());
+            snprintf(summary, sizeof(summary), "%u event%s today\n%u total this week",
+                     static_cast<unsigned>(today_events), today_events == 1 ? "" : "s",
+                     static_cast<unsigned>(CALENDAR_EVENT_COUNT));
         } else {
-            //
-            // Past/future week: all events in CALENDAR_EVENTS belong
-            // to the week currently being displayed.
-            //
-            if (g_summary_title) {
-                set_label_text(g_summary_title, "SELECTED WEEK");
-            }
-
-            snprintf(
-                summary,
-                sizeof(summary),
-                "%u event%s",
-                static_cast<unsigned>(CALENDAR_EVENT_COUNT),
-                CALENDAR_EVENT_COUNT == 1 ? "" : "s"
-            );
+            if (g_summary_title) set_label_text(g_summary_title, "SELECTED WEEK");
+            snprintf(summary, sizeof(summary), "%u event%s",
+                     static_cast<unsigned>(CALENDAR_EVENT_COUNT),
+                     CALENDAR_EVENT_COUNT == 1 ? "" : "s");
         }
-
         set_label_text(g_summary_label, summary);
     }
 }
@@ -1103,6 +1136,7 @@ void set_week_offset(int new_offset, const char *reason) {
     g_week_nav_changed_ms = millis();
     g_week_nav_refresh_offset = new_offset;
     g_week_nav_refresh_pending = true;
+    mark_dashboard_dirty(Dashboard::Meals);
 
     ESP_LOGI("FamilyCalendar", "[Calendar] Week changed to offset %d (%s)",
              g_week_offset, reason ? reason : "unknown");
@@ -1298,9 +1332,8 @@ void create_calendar_dashboard() {
         lv_obj_set_pos(column, CAL_X + day * (DAY_W + DAY_GAP), CAL_MAIN_Y);
         style_box(column, theme().panel, 12, 1);
         g_day_columns[day] = column;
+        create_calendar_day_widgets(column, day);
     }
-
-    render_week();
 }
 
 void chore_toggle_cb(lv_event_t *e) {
@@ -1359,182 +1392,218 @@ void chore_select_list_cb(lv_event_t *e) {
     request_rebuild();
 }
 
-void create_chore_list_picker(lv_obj_t *page) {
-    home_assistant_request_todo_discovery();
+void create_chores_dashboard() {
+    g_chore_page = lv_obj_create(g_screen);
+    lv_obj_set_size(g_chore_page, SCREEN_W - 16, PAGE_H);
+    lv_obj_set_pos(g_chore_page, 8, PAGE_Y);
+    style_box(g_chore_page, theme().panel, 14, 1);
+    lv_obj_set_style_pad_all(g_chore_page, 18, LV_PART_MAIN);
+    lv_obj_remove_flag(g_chore_page, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *title = label(page, "Choose a Home Assistant chore list", &lv_font_montserrat_24,
-                            theme().text, 620);
-    lv_obj_set_pos(title, 0, 0);
+    constexpr int CONTENT_W = 1226;
+    constexpr int CONTENT_H = PAGE_H - 36;
 
-    lv_obj_t *description = label(
-        page,
+    // Persistent picker -------------------------------------------------------
+    g_chore_picker = lv_obj_create(g_chore_page);
+    lv_obj_set_size(g_chore_picker, CONTENT_W, CONTENT_H);
+    lv_obj_set_pos(g_chore_picker, 0, 0);
+    lv_obj_set_style_bg_opa(g_chore_picker, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(g_chore_picker, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(g_chore_picker, 0, LV_PART_MAIN);
+    lv_obj_add_flag(g_chore_picker, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(g_chore_picker, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(g_chore_picker, LV_SCROLLBAR_MODE_AUTO);
+
+    lv_obj_t *picker_title = label(g_chore_picker, "Choose a Home Assistant chore list",
+                                   &lv_font_montserrat_24, theme().text, 620);
+    lv_obj_set_pos(picker_title, 0, 0);
+    lv_obj_t *picker_desc = label(
+        g_chore_picker,
         "Select the Home Assistant todo.* entity that should back this dashboard. The selection is saved on the display.",
-        &lv_font_montserrat_14,
-        theme().muted,
-        900);
-    lv_label_set_long_mode(description, LV_LABEL_LONG_WRAP);
-    lv_obj_set_pos(description, 0, 40);
+        &lv_font_montserrat_14, theme().muted, 900);
+    lv_label_set_long_mode(picker_desc, LV_LABEL_LONG_WRAP);
+    lv_obj_set_pos(picker_desc, 0, 40);
 
-    if (chore_service_configured()) {
-        lv_obj_t *cancel = button(page, "Back", 100, 40, false, &lv_font_montserrat_14);
-        lv_obj_set_pos(cancel, 1110, 8);
-        lv_obj_add_event_cb(cancel, chore_cancel_list_cb, LV_EVENT_CLICKED, nullptr);
-    }
+    g_chore_picker_back = button(g_chore_picker, "Back", 100, 40, false, &lv_font_montserrat_14);
+    lv_obj_set_pos(g_chore_picker_back, 1110, 8);
+    lv_obj_add_event_cb(g_chore_picker_back, chore_cancel_list_cb, LV_EVENT_CLICKED, nullptr);
 
-    if (!home_assistant_todo_lists_ready()) {
-        lv_obj_t *loading = label(page, "Discovering Home Assistant to-do lists in the background...",
-                                  &lv_font_montserrat_18, theme().muted, 760);
-        lv_obj_set_pos(loading, 0, 120);
-        return;
-    }
+    g_chore_picker_status = label(g_chore_picker, "", &lv_font_montserrat_18,
+                                  theme().muted, 980);
+    lv_label_set_long_mode(g_chore_picker_status, LV_LABEL_LONG_WRAP);
+    lv_obj_set_pos(g_chore_picker_status, 0, 120);
 
-    const size_t count = home_assistant_todo_list_count();
-    if (count == 0) {
-        lv_obj_t *empty = label(
-            page,
-            "No todo.* entities were found. Create a To-do list in Home Assistant, then reboot or return here to discover it.",
-            &lv_font_montserrat_18,
-            theme().muted,
-            980);
-        lv_label_set_long_mode(empty, LV_LABEL_LONG_WRAP);
-        lv_obj_set_pos(empty, 0, 120);
-        return;
-    }
-
-    constexpr int CARD_W = 580;
-    constexpr int CARD_H = 84;
-    constexpr int GAP_X = 28;
-    constexpr int GAP_Y = 14;
-    constexpr int START_Y = 104;
-
-    for (size_t i = 0; i < count; ++i) {
+    constexpr int PICKER_CARD_W = 580;
+    constexpr int PICKER_CARD_H = 84;
+    constexpr int PICKER_GAP_X = 28;
+    constexpr int PICKER_GAP_Y = 14;
+    constexpr int PICKER_START_Y = 104;
+    for (size_t i = 0; i < HA_MAX_TODO_LISTS; ++i) {
+        PickerCardWidgets &slot = g_chore_picker_cards[i];
         const int column = static_cast<int>(i % 2);
         const int row = static_cast<int>(i / 2);
-        const int x = column * (CARD_W + GAP_X);
-        const int y = START_Y + row * (CARD_H + GAP_Y);
-
-        lv_obj_t *card = lv_button_create(page);
-        lv_obj_set_size(card, CARD_W, CARD_H);
-        lv_obj_set_pos(card, x, y);
-        style_box(card, theme().panel_alt, 12, 1);
-        lv_obj_set_style_pad_all(card, 14, LV_PART_MAIN);
-
-        lv_obj_t *name = label(card, home_assistant_todo_list_name(i), &lv_font_montserrat_18,
-                               theme().text, CARD_W - 28);
-        lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
-        lv_obj_set_pos(name, 0, 4);
-
-        lv_obj_t *entity = label(card, home_assistant_todo_list_entity(i), &lv_font_montserrat_12,
-                                 theme().muted, CARD_W - 28);
-        lv_label_set_long_mode(entity, LV_LABEL_LONG_DOT);
-        lv_obj_set_pos(entity, 0, 42);
-
-        lv_obj_add_event_cb(card, chore_select_list_cb, LV_EVENT_CLICKED,
+        slot.card = lv_button_create(g_chore_picker);
+        lv_obj_set_size(slot.card, PICKER_CARD_W, PICKER_CARD_H);
+        lv_obj_set_pos(slot.card, column * (PICKER_CARD_W + PICKER_GAP_X),
+                       PICKER_START_Y + row * (PICKER_CARD_H + PICKER_GAP_Y));
+        style_box(slot.card, theme().panel_alt, 12, 1);
+        lv_obj_set_style_pad_all(slot.card, 14, LV_PART_MAIN);
+        slot.name = label(slot.card, "", &lv_font_montserrat_18, theme().text, PICKER_CARD_W - 28);
+        lv_label_set_long_mode(slot.name, LV_LABEL_LONG_DOT);
+        lv_obj_set_pos(slot.name, 0, 4);
+        slot.entity = label(slot.card, "", &lv_font_montserrat_12, theme().muted, PICKER_CARD_W - 28);
+        lv_label_set_long_mode(slot.entity, LV_LABEL_LONG_DOT);
+        lv_obj_set_pos(slot.entity, 0, 42);
+        lv_obj_add_event_cb(slot.card, chore_select_list_cb, LV_EVENT_CLICKED,
                             reinterpret_cast<void *>(static_cast<intptr_t>(i)));
-    }
-}
-
-void create_chores_dashboard() {
-    lv_obj_t *page = lv_obj_create(g_screen);
-    lv_obj_set_size(page, SCREEN_W - 16, PAGE_H);
-    lv_obj_set_pos(page, 8, PAGE_Y);
-    style_box(page, theme().panel, 14, 1);
-    lv_obj_set_style_pad_all(page, 18, LV_PART_MAIN);
-
-    if (!chore_service_configured() || g_chore_choose_list) {
-        /* Picker can extend below one screen when many todo entities exist. */
-        lv_obj_add_flag(page, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_scroll_dir(page, LV_DIR_VER);
-        create_chore_list_picker(page);
-        return;
+        lv_obj_add_flag(slot.card, LV_OBJ_FLAG_HIDDEN);
     }
 
-    lv_obj_add_flag(page, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scroll_dir(page, LV_DIR_VER);
+    // Persistent chore list ---------------------------------------------------
+    g_chore_main = lv_obj_create(g_chore_page);
+    lv_obj_set_size(g_chore_main, CONTENT_W, CONTENT_H);
+    lv_obj_set_pos(g_chore_main, 0, 0);
+    lv_obj_set_style_bg_opa(g_chore_main, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(g_chore_main, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(g_chore_main, 0, LV_PART_MAIN);
+    lv_obj_add_flag(g_chore_main, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(g_chore_main, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(g_chore_main, LV_SCROLLBAR_MODE_AUTO);
 
-    lv_obj_t *title = label(page, "Home Assistant chores", &lv_font_montserrat_24, theme().text, 420);
+    lv_obj_t *title = label(g_chore_main, "Home Assistant chores", &lv_font_montserrat_24,
+                            theme().text, 420);
     lv_obj_set_pos(title, 0, 0);
+    g_chore_source = label(g_chore_main, "", &lv_font_montserrat_12, theme().muted, 560);
+    lv_label_set_long_mode(g_chore_source, LV_LABEL_LONG_DOT);
+    lv_obj_set_pos(g_chore_source, 0, 40);
+    g_chore_progress_label = label(g_chore_main, "", &lv_font_montserrat_14, theme().muted, 650);
+    lv_obj_set_pos(g_chore_progress_label, 0, 68);
 
-    lv_obj_t *source = label(page, chore_service_entity(), &lv_font_montserrat_12, theme().muted, 560);
-    lv_label_set_long_mode(source, LV_LABEL_LONG_DOT);
-    lv_obj_set_pos(source, 0, 40);
+    g_chore_progress = lv_bar_create(g_chore_main);
+    lv_obj_set_size(g_chore_progress, 500, 14);
+    lv_obj_set_pos(g_chore_progress, 0, 96);
+    lv_obj_set_style_bg_color(g_chore_progress, lv_color_hex(theme().button), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(g_chore_progress, lv_color_hex(theme().accent), LV_PART_INDICATOR);
 
-    const size_t count = chore_service_count();
-    const size_t completed = chore_service_completed_count();
-    char progress_text[96];
-    snprintf(progress_text, sizeof(progress_text), "%u of %u complete  |  auto-refreshes every 1 min while visible",
-             static_cast<unsigned>(completed), static_cast<unsigned>(count));
-    lv_obj_t *progress_label = label(page, progress_text, &lv_font_montserrat_14, theme().muted, 650);
-    lv_obj_set_pos(progress_label, 0, 68);
-
-    lv_obj_t *progress = lv_bar_create(page);
-    lv_obj_set_size(progress, 500, 14);
-    lv_obj_set_pos(progress, 0, 96);
-    lv_bar_set_range(progress, 0, count > 0 ? static_cast<int32_t>(count) : 1);
-    lv_bar_set_value(progress, static_cast<int32_t>(completed), LV_ANIM_OFF);
-    lv_obj_set_style_bg_color(progress, lv_color_hex(theme().button), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(progress, lv_color_hex(theme().accent), LV_PART_INDICATOR);
-
-    lv_obj_t *reset = button(page, "Reset all", 110, 40, false, &lv_font_montserrat_14);
+    lv_obj_t *reset = button(g_chore_main, "Reset all", 110, 40, false, &lv_font_montserrat_14);
     lv_obj_set_pos(reset, 850, 18);
     lv_obj_add_event_cb(reset, chore_reset_cb, LV_EVENT_CLICKED, nullptr);
-
-    lv_obj_t *refresh = button(page, "Refresh", 110, 40, false, &lv_font_montserrat_14);
+    lv_obj_t *refresh = button(g_chore_main, "Refresh", 110, 40, false, &lv_font_montserrat_14);
     lv_obj_set_pos(refresh, 972, 18);
     lv_obj_add_event_cb(refresh, chore_refresh_cb, LV_EVENT_CLICKED, nullptr);
-
-    lv_obj_t *change = button(page, "Change list", 132, 40, false, &lv_font_montserrat_14);
+    lv_obj_t *change = button(g_chore_main, "Change list", 132, 40, false, &lv_font_montserrat_14);
     lv_obj_set_pos(change, 1094, 18);
     lv_obj_add_event_cb(change, chore_change_list_cb, LV_EVENT_CLICKED, nullptr);
 
-    if (count == 0) {
-        lv_obj_t *empty = label(
-            page,
-            "No items are loaded from this Home Assistant to-do list yet. Tap Refresh if you just selected it.",
-            &lv_font_montserrat_18,
-            theme().muted,
-            950);
-        lv_label_set_long_mode(empty, LV_LABEL_LONG_WRAP);
-        lv_obj_set_pos(empty, 0, 156);
-        return;
-    }
+    g_chore_empty = label(g_chore_main,
+                          "No items are loaded from this Home Assistant to-do list yet. Tap Refresh if you just selected it.",
+                          &lv_font_montserrat_18, theme().muted, 950);
+    lv_label_set_long_mode(g_chore_empty, LV_LABEL_LONG_WRAP);
+    lv_obj_set_pos(g_chore_empty, 0, 156);
 
     constexpr int CARD_W = 580;
     constexpr int CARD_H = 96;
     constexpr int GAP_X = 28;
     constexpr int GAP_Y = 14;
     constexpr int START_Y = 136;
-
-    for (size_t i = 0; i < count; ++i) {
+    for (size_t i = 0; i < HA_MAX_CHORES; ++i) {
+        ChoreCardWidgets &slot = g_chore_cards[i];
         const int column = static_cast<int>(i % 2);
         const int row = static_cast<int>(i / 2);
-        const int x = column * (CARD_W + GAP_X);
-        const int y = START_Y + row * (CARD_H + GAP_Y);
+        slot.card = lv_button_create(g_chore_main);
+        lv_obj_set_size(slot.card, CARD_W, CARD_H);
+        lv_obj_set_pos(slot.card, column * (CARD_W + GAP_X), START_Y + row * (CARD_H + GAP_Y));
+        style_box(slot.card, theme().panel_alt, 12, 1);
+        lv_obj_set_style_pad_all(slot.card, 16, LV_PART_MAIN);
+        slot.task = label(slot.card, "", &lv_font_montserrat_18, theme().text, CARD_W - 32);
+        lv_label_set_long_mode(slot.task, LV_LABEL_LONG_DOT);
+        lv_obj_set_pos(slot.task, 0, 8);
+        slot.hint = label(slot.card, "", &lv_font_montserrat_12, theme().muted, CARD_W - 32);
+        lv_label_set_long_mode(slot.hint, LV_LABEL_LONG_DOT);
+        lv_obj_set_pos(slot.hint, 0, 52);
+        lv_obj_add_event_cb(slot.card, chore_toggle_cb, LV_EVENT_CLICKED,
+                            reinterpret_cast<void *>(static_cast<intptr_t>(i)));
+        lv_obj_add_flag(slot.card, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+void update_chores_dashboard() {
+    if (!g_chore_page) return;
+    const bool picker_mode = !chore_service_configured() || g_chore_choose_list;
+
+    if (picker_mode) {
+        lv_obj_remove_flag(g_chore_picker, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(g_chore_main, LV_OBJ_FLAG_HIDDEN);
+        home_assistant_request_todo_discovery();
+
+        if (chore_service_configured()) lv_obj_remove_flag(g_chore_picker_back, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_add_flag(g_chore_picker_back, LV_OBJ_FLAG_HIDDEN);
+
+        size_t count = 0;
+        if (!home_assistant_todo_lists_ready()) {
+            set_label_text(g_chore_picker_status, "Discovering Home Assistant to-do lists in the background...");
+            lv_obj_remove_flag(g_chore_picker_status, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            count = home_assistant_todo_list_count();
+            if (count > HA_MAX_TODO_LISTS) count = HA_MAX_TODO_LISTS;
+            if (count == 0) {
+                set_label_text(g_chore_picker_status,
+                               "No todo.* entities were found. Create a To-do list in Home Assistant, then return here to discover it.");
+                lv_obj_remove_flag(g_chore_picker_status, LV_OBJ_FLAG_HIDDEN);
+            } else {
+                lv_obj_add_flag(g_chore_picker_status, LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+
+        for (size_t i = 0; i < HA_MAX_TODO_LISTS; ++i) {
+            PickerCardWidgets &slot = g_chore_picker_cards[i];
+            if (i < count) {
+                set_label_text(slot.name, home_assistant_todo_list_name(i));
+                set_label_text(slot.entity, home_assistant_todo_list_entity(i));
+                lv_obj_remove_flag(slot.card, LV_OBJ_FLAG_HIDDEN);
+            } else {
+                lv_obj_add_flag(slot.card, LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+        return;
+    }
+
+    lv_obj_add_flag(g_chore_picker, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(g_chore_main, LV_OBJ_FLAG_HIDDEN);
+    set_label_text(g_chore_source, chore_service_entity());
+
+    size_t count = chore_service_count();
+    if (count > HA_MAX_CHORES) count = HA_MAX_CHORES;
+    const size_t completed = chore_service_completed_count();
+    char progress_text[96];
+    snprintf(progress_text, sizeof(progress_text), "%u of %u complete  |  auto-refreshes every 1 min while visible",
+             static_cast<unsigned>(completed), static_cast<unsigned>(count));
+    set_label_text(g_chore_progress_label, progress_text);
+    lv_bar_set_range(g_chore_progress, 0, count > 0 ? static_cast<int32_t>(count) : 1);
+    lv_bar_set_value(g_chore_progress, static_cast<int32_t>(completed), LV_ANIM_OFF);
+
+    if (count == 0) lv_obj_remove_flag(g_chore_empty, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(g_chore_empty, LV_OBJ_FLAG_HIDDEN);
+
+    for (size_t i = 0; i < HA_MAX_CHORES; ++i) {
+        ChoreCardWidgets &slot = g_chore_cards[i];
+        if (i >= count) {
+            lv_obj_add_flag(slot.card, LV_OBJ_FLAG_HIDDEN);
+            continue;
+        }
+
         const bool done = chore_service_done(i);
         const ChoreItem *item = chore_service_item(i);
-
-        lv_obj_t *card = lv_button_create(page);
-        lv_obj_set_size(card, CARD_W, CARD_H);
-        lv_obj_set_pos(card, x, y);
-        style_box(card, done ? theme().accent_soft : theme().panel_alt, 12, 1);
-        lv_obj_set_style_pad_all(card, 16, LV_PART_MAIN);
-
         char text[160];
         snprintf(text, sizeof(text), "%s  %s", done ? "[x]" : "[ ]", chore_service_name(i));
-        lv_obj_t *task = label(card, text, &lv_font_montserrat_18,
-                               done ? theme().accent : theme().text, CARD_W - 32);
-        lv_label_set_long_mode(task, LV_LABEL_LONG_DOT);
-        lv_obj_set_pos(task, 0, 8);
-
+        set_label_text(slot.task, text);
+        lv_obj_set_style_text_color(slot.task, lv_color_hex(done ? theme().accent : theme().text), LV_PART_MAIN);
+        lv_obj_set_style_bg_color(slot.card, lv_color_hex(done ? theme().accent_soft : theme().panel_alt), LV_PART_MAIN);
         const char *detail = (item && item->description[0])
                                  ? item->description
                                  : (done ? "Tap to mark incomplete" : "Tap to complete");
-        lv_obj_t *hint = label(card, detail, &lv_font_montserrat_12, theme().muted, CARD_W - 32);
-        lv_label_set_long_mode(hint, LV_LABEL_LONG_DOT);
-        lv_obj_set_pos(hint, 0, 52);
-
-        lv_obj_add_event_cb(card, chore_toggle_cb, LV_EVENT_CLICKED,
-                            reinterpret_cast<void *>(static_cast<intptr_t>(i)));
+        set_label_text(slot.hint, detail);
+        lv_obj_remove_flag(slot.card, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
@@ -1563,93 +1632,69 @@ bool is_meal_event(const CalendarEvent &event) {
     return false;
 }
 
-void create_meal_day_card(lv_obj_t *page, int day, time_t day_time, int x, int y, int w, int h) {
-    lv_obj_t *card = lv_obj_create(page);
-    lv_obj_set_size(card, w, h);
-    lv_obj_set_pos(card, x, y);
-    style_box(card, theme().panel_alt, 12, 1);
-    lv_obj_set_style_pad_all(card, 16, LV_PART_MAIN);
+void meal_card_clicked_cb(lv_event_t *e) {
+    auto *widgets = static_cast<MealDayWidgets *>(lv_event_get_user_data(e));
+    if (!widgets || !widgets->first_event) return;
+    show_event_details_overlay(*widgets->first_event);
+}
 
-    struct tm day_tm = {};
-    localtime_r(&day_time, &day_tm);
-    static const char *months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+void create_meal_day_card(lv_obj_t *page, int day, int x, int y, int w, int h) {
+    MealDayWidgets &widgets = g_meal_days[day];
+    widgets.card = lv_obj_create(page);
+    lv_obj_set_size(widgets.card, w, h);
+    lv_obj_set_pos(widgets.card, x, y);
+    style_box(widgets.card, theme().panel_alt, 12, 1);
+    lv_obj_set_style_pad_all(widgets.card, 16, LV_PART_MAIN);
 
-    char heading[40];
-    snprintf(heading, sizeof(heading), "%s  |  %s %d",
-             calendar_day_name(static_cast<uint8_t>(day)), months[day_tm.tm_mon], day_tm.tm_mday);
-    lv_obj_t *day_label = label(card, heading, &lv_font_montserrat_16, theme().text, w - 32);
-    lv_obj_set_pos(day_label, 0, 0);
-
-    int meal_count = 0;
-    int text_y = 40;
-    const CalendarEvent *first_event = nullptr;
-    for (size_t i = 0; i < CALENDAR_EVENT_COUNT && meal_count < 3; ++i) {
-        const CalendarEvent &event = CALENDAR_EVENTS[i];
-        if (!calendar_event_is_on_day(event, day_time) || !is_meal_event(event)) continue;
-        if (!first_event) first_event = &event;
-
-        char time_text[22];
-        calendar_format_event_time(event, time_text, sizeof(time_text));
-        char line[120];
-        snprintf(line, sizeof(line), "%s  %s", time_text, event.title);
-        lv_obj_t *meal = label(card, line, &lv_font_montserrat_14, theme().text, w - 32);
-        lv_label_set_long_mode(meal, LV_LABEL_LONG_WRAP);
-        lv_obj_set_height(meal, 48);
-        lv_obj_set_pos(meal, 0, text_y);
-        text_y += 52;
-        ++meal_count;
+    widgets.heading = label(widgets.card, "", &lv_font_montserrat_16, theme().text, w - 32);
+    lv_obj_set_pos(widgets.heading, 0, 0);
+    for (int i = 0; i < 3; ++i) {
+        widgets.meal_lines[i] = label(widgets.card, "", &lv_font_montserrat_14, theme().text, w - 32);
+        lv_label_set_long_mode(widgets.meal_lines[i], LV_LABEL_LONG_WRAP);
+        lv_obj_set_height(widgets.meal_lines[i], 48);
+        lv_obj_set_pos(widgets.meal_lines[i], 0, 40 + i * 52);
+        lv_obj_add_flag(widgets.meal_lines[i], LV_OBJ_FLAG_HIDDEN);
     }
-
-    if (meal_count == 0) {
-        lv_obj_t *empty = label(card, "No meal event on the calendar", &lv_font_montserrat_14,
-                                theme().muted, w - 32);
-        lv_label_set_long_mode(empty, LV_LABEL_LONG_WRAP);
-        lv_obj_set_pos(empty, 0, 52);
-    } else if (first_event) {
-        lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_add_event_cb(card, event_clicked_cb, LV_EVENT_CLICKED, const_cast<CalendarEvent *>(first_event));
-        lv_obj_t *hint = label(card, "Tap for details", &lv_font_montserrat_12, theme().muted, w - 32);
-        lv_obj_align(hint, LV_ALIGN_BOTTOM_LEFT, 0, 0);
-    }
+    widgets.empty = label(widgets.card, "No meal event on the calendar", &lv_font_montserrat_14,
+                          theme().muted, w - 32);
+    lv_label_set_long_mode(widgets.empty, LV_LABEL_LONG_WRAP);
+    lv_obj_set_pos(widgets.empty, 0, 52);
+    widgets.hint = label(widgets.card, "Tap for details", &lv_font_montserrat_12,
+                         theme().muted, w - 32);
+    lv_obj_align(widgets.hint, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+    lv_obj_add_flag(widgets.hint, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_event_cb(widgets.card, meal_card_clicked_cb, LV_EVENT_CLICKED, &widgets);
+    lv_obj_remove_flag(widgets.card, LV_OBJ_FLAG_CLICKABLE);
 }
 
 void create_meals_dashboard() {
-    lv_obj_t *page = lv_obj_create(g_screen);
-    lv_obj_set_size(page, SCREEN_W - 16, PAGE_H);
-    lv_obj_set_pos(page, 8, PAGE_Y);
-    style_box(page, theme().panel, 14, 1);
-    lv_obj_set_style_pad_all(page, 16, LV_PART_MAIN);
+    g_meals_page = lv_obj_create(g_screen);
+    lv_obj_set_size(g_meals_page, SCREEN_W - 16, PAGE_H);
+    lv_obj_set_pos(g_meals_page, 8, PAGE_Y);
+    style_box(g_meals_page, theme().panel, 14, 1);
+    lv_obj_set_style_pad_all(g_meals_page, 16, LV_PART_MAIN);
 
-    lv_obj_t *title = label(page, "Meals", &lv_font_montserrat_24, theme().text, 260);
+    lv_obj_t *title = label(g_meals_page, "Meals", &lv_font_montserrat_24, theme().text, 260);
     lv_obj_set_pos(title, 0, 0);
-
     lv_obj_t *description = label(
-        page,
-        "Automatically finds meal-like events in the current Home Assistant calendar week.  Calendar data refreshes every 5 min while visible.",
-        &lv_font_montserrat_14,
-        theme().muted,
-        760);
+        g_meals_page,
+        "Automatically finds meal-like events in the selected Home Assistant calendar week. Calendar data refreshes every 5 min while visible.",
+        &lv_font_montserrat_14, theme().muted, 820);
     lv_obj_set_pos(description, 0, 38);
-
     lv_obj_t *keywords = label(
-        page,
+        g_meals_page,
         "Looks for breakfast, brunch, lunch, dinner, supper, meal, restaurant, or cookout.",
-        &lv_font_montserrat_12,
-        theme().muted,
-        780);
+        &lv_font_montserrat_12, theme().muted, 780);
     lv_obj_set_pos(keywords, 0, 64);
 
-    time_t week_start = time_service_start_of_week(time_service_now());
-    week_start = time_service_add_days(week_start, g_week_offset * 7);
     constexpr int GAP = 12;
     constexpr int CARD_W = 292;
     constexpr int CARD_H = 242;
     constexpr int ROW1_Y = 100;
     constexpr int ROW2_Y = ROW1_Y + CARD_H + GAP;
-
     for (int day = 0; day < 7; ++day) {
-        int x = 0;
-        int y = 0;
+        int x;
+        int y;
         if (day < 4) {
             x = day * (CARD_W + GAP);
             y = ROW1_Y;
@@ -1659,13 +1704,59 @@ void create_meals_dashboard() {
             x = row2_start + (day - 4) * (CARD_W + GAP);
             y = ROW2_Y;
         }
-        create_meal_day_card(page, day, time_service_add_days(week_start, day), x, y, CARD_W, CARD_H);
+        create_meal_day_card(g_meals_page, day, x, y, CARD_W, CARD_H);
+    }
+}
+
+void update_meals_dashboard() {
+    if (!g_meals_page) return;
+    time_t week_start = time_service_start_of_week(time_service_now());
+    week_start = time_service_add_days(week_start, g_week_offset * 7);
+    static const char *months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+
+    for (int day = 0; day < 7; ++day) {
+        MealDayWidgets &widgets = g_meal_days[day];
+        const time_t day_time = time_service_add_days(week_start, day);
+        struct tm day_tm = {};
+        localtime_r(&day_time, &day_tm);
+        char heading[40];
+        snprintf(heading, sizeof(heading), "%s  |  %s %d",
+                 calendar_day_name(static_cast<uint8_t>(day)), months[day_tm.tm_mon], day_tm.tm_mday);
+        set_label_text(widgets.heading, heading);
+
+        int meal_count = 0;
+        widgets.first_event = nullptr;
+        for (size_t i = 0; i < CALENDAR_EVENT_COUNT && meal_count < 3; ++i) {
+            const CalendarEvent &event = CALENDAR_EVENTS[i];
+            if (!calendar_event_is_on_day(event, day_time) || !is_meal_event(event)) continue;
+            if (!widgets.first_event) widgets.first_event = &event;
+            char time_text[22];
+            calendar_format_event_time(event, time_text, sizeof(time_text));
+            char line[160];
+            snprintf(line, sizeof(line), "%s  %s", time_text, event.title);
+            set_label_text(widgets.meal_lines[meal_count], line);
+            lv_obj_remove_flag(widgets.meal_lines[meal_count], LV_OBJ_FLAG_HIDDEN);
+            ++meal_count;
+        }
+        for (int i = meal_count; i < 3; ++i) {
+            lv_obj_add_flag(widgets.meal_lines[i], LV_OBJ_FLAG_HIDDEN);
+        }
+
+        if (meal_count == 0) {
+            lv_obj_remove_flag(widgets.empty, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(widgets.hint, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_flag(widgets.card, LV_OBJ_FLAG_CLICKABLE);
+        } else {
+            lv_obj_add_flag(widgets.empty, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_flag(widgets.hint, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(widgets.card, LV_OBJ_FLAG_CLICKABLE);
+        }
     }
 }
 
 void weather_refresh_cb(lv_event_t *) {
     weather_service_request_refresh(true, "manual weather refresh");
-    request_rebuild();
+    update_weather_dashboard();
 }
 
 uint32_t weather_condition_accent(WeatherCondition condition) {
@@ -1693,15 +1784,6 @@ lv_obj_t *weather_centered_label(lv_obj_t *parent,
     lv_obj_t *obj = label(parent, text, font, color, width);
     if (!obj) return nullptr;
     lv_obj_set_style_text_align(obj, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-
-    /*
-     * Do not query lv_obj_get_width(parent) here.  These weather cards are
-     * created and populated before LVGL has completed a layout pass, so the
-     * queried width can still be the object's old/default width.  That made
-     * centered labels start at a negative X coordinate and clipped the left
-     * side of the day name, H/L text, and condition.  The caller already
-     * knows the card's exact width, so use that deterministic value instead.
-     */
     lv_obj_set_pos(obj, (parent_width - width) / 2, y);
     return obj;
 }
@@ -1712,386 +1794,325 @@ void create_weather_metric_card(lv_obj_t *parent,
                                 int w,
                                 int h,
                                 const char *caption,
-                                const char *value,
-                                uint32_t accent) {
+                                uint32_t accent,
+                                WeatherMetricWidgets &widgets) {
     lv_obj_t *card = lv_obj_create(parent);
-    if (!card) return;
     lv_obj_set_size(card, w, h);
     lv_obj_set_pos(card, x, y);
     style_box(card, theme().panel, 12, 1);
-
     icon_piece(card, 14, 14, 10, 10, accent, 5);
-
     lv_obj_t *cap = label(card, caption, &lv_font_montserrat_12, theme().muted, w - 46);
     set_pos_if(cap, 32, 10);
-
-    lv_obj_t *val = label(card, value, &lv_font_montserrat_18, theme().text, w - 28);
-    if (val) lv_label_set_long_mode(val, LV_LABEL_LONG_DOT);
-    set_pos_if(val, 14, 42);
+    widgets.value = label(card, "--", &lv_font_montserrat_18, theme().text, w - 28);
+    if (widgets.value) lv_label_set_long_mode(widgets.value, LV_LABEL_LONG_DOT);
+    set_pos_if(widgets.value, 14, 42);
 }
 
 void create_weather_daily_card(lv_obj_t *parent,
-                               const WeatherDayForecast &day,
                                int x,
                                int y,
                                int w,
-                               int h) {
-    lv_obj_t *card = lv_obj_create(parent);
-    if (!card) return;
-    lv_obj_set_size(card, w, h);
-    lv_obj_set_pos(card, x, y);
-    style_box(card, theme().panel_alt, 12, 1);
-
-    const uint32_t accent = weather_condition_accent(day.condition);
-    icon_piece(card, 0, 0, w, 4, accent, 2);
-
-    static const char *short_days[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
-    char day_name[12] = "Day";
-    struct tm day_tm = {};
-    if (localtime_r(&day.local_day_epoch, &day_tm) && day_tm.tm_wday >= 0 && day_tm.tm_wday <= 6) {
-        snprintf(day_name, sizeof(day_name), "%s", short_days[day_tm.tm_wday]);
-    }
-
-    // Stronger visual hierarchy: larger day name and weather icon.
-    weather_centered_label(card, day_name, &lv_font_montserrat_20, theme().text, w, w - 16, 7);
-
-    constexpr int DAILY_ICON_SIZE = 58;
-    lv_obj_t *icon = create_weather_icon(card,
-                                         day.condition,
-                                         DAILY_ICON_SIZE,
-                                         theme().text,
-                                         theme().accent,
-                                         day.symbol_code);
-    if (icon) lv_obj_set_pos(icon, (w - DAILY_ICON_SIZE) / 2, 31);
-
-    // Keep the condition secondary so the temperatures remain the main data.
-    lv_obj_t *condition = weather_centered_label(card,
-                                                  weather_condition_label(day.condition),
-                                                  &lv_font_montserrat_12,
-                                                  theme().muted,
-                                                  w,
-                                                  w - 16,
-                                                  93);
-    if (condition) lv_label_set_long_mode(condition, LV_LABEL_LONG_DOT);
-
-    // Keep high/low in one label so the daily card uses the same LVGL object
-    // count as the known-stable version.  The larger font and accent color
-    // preserve the visual hierarchy without adding extra child objects.
-    char temps[32];
-    if (isfinite(day.high_c) && isfinite(day.low_c)) {
-        snprintf(temps, sizeof(temps), "%d / %d %s",
-                 rounded_display_temp(day.high_c),
-                 rounded_display_temp(day.low_c),
-                 weather_temperature_unit());
-    } else {
-        snprintf(temps, sizeof(temps), "-- / -- %s", weather_temperature_unit());
-    }
-    weather_centered_label(card,
-                           temps,
-                           &lv_font_montserrat_20,
-                           accent,
-                           w,
-                           w - 12,
-                           116);
+                               int h,
+                               WeatherDailyWidgets &widgets) {
+    widgets.card = lv_obj_create(parent);
+    lv_obj_set_size(widgets.card, w, h);
+    lv_obj_set_pos(widgets.card, x, y);
+    style_box(widgets.card, theme().panel_alt, 12, 1);
+    widgets.accent = icon_piece(widgets.card, 0, 0, w, 4, theme().accent, 2);
+    widgets.day = weather_centered_label(widgets.card, "---", &lv_font_montserrat_20,
+                                         theme().text, w, w - 16, 7);
+    widgets.icon = create_weather_image(widgets.card, 64);
+    if (widgets.icon) lv_obj_set_pos(widgets.icon, (w - 64) / 2, 30);
+    widgets.condition = weather_centered_label(widgets.card, "--", &lv_font_montserrat_12,
+                                               theme().muted, w, w - 16, 94);
+    if (widgets.condition) lv_label_set_long_mode(widgets.condition, LV_LABEL_LONG_DOT);
+    widgets.temps = weather_centered_label(widgets.card, "-- / --", &lv_font_montserrat_20,
+                                           theme().accent, w, w - 12, 116);
 }
 
 void create_weather_hourly_card(lv_obj_t *parent,
-                                const WeatherHourForecast &hour,
                                 int x,
                                 int y,
                                 int w,
-                                int h) {
-    /*
-     * Keep hourly tiles deliberately lightweight.  A full primitive weather
-     * icon is composed of several LVGL child objects.  Multiplying that by
-     * 18 hourly tiles created hundreds of objects during a single screen
-     * rebuild and could stall the LVGL task on the panel.  The hero and daily
-     * cards keep the full graphical icons; hourly cards use a colored
-     * condition marker instead.
-     */
-    lv_obj_t *card = lv_obj_create(parent);
-    if (!card) return;
-    lv_obj_set_size(card, w, h);
-    lv_obj_set_pos(card, x, y);
-    style_box(card, theme().panel_alt, 10, 1);
-
-    const uint32_t accent = weather_condition_accent(hour.condition);
-    icon_piece(card, 0, 0, w, 3, accent, 1);
-    icon_piece(card, 12, 37, 12, 12, accent, 6);
-
-    char time_text[16];
-    time_service_format_time(hour.epoch, time_text, sizeof(time_text));
-    lv_obj_t *time_label = label(card, time_text, &lv_font_montserrat_14, theme().muted, w - 20);
-    set_pos_if(time_label, 10, 8);
-
-    char temp[24];
-    if (isfinite(hour.temperature_c)) {
-        snprintf(temp, sizeof(temp), "%d %s",
-                 rounded_display_temp(hour.temperature_c),
-                 weather_temperature_unit());
-    } else {
-        snprintf(temp, sizeof(temp), "-- %s", weather_temperature_unit());
-    }
-    lv_obj_t *temp_label = label(card, temp, &lv_font_montserrat_18, theme().text, w - 42);
-    set_pos_if(temp_label, 32, 31);
-
-    lv_obj_t *condition = label(card,
-                                weather_condition_label(hour.condition),
-                                &lv_font_montserrat_12,
-                                theme().muted,
-                                w - 20);
-    if (condition) lv_label_set_long_mode(condition, LV_LABEL_LONG_DOT);
-    set_pos_if(condition, 10, 61);
+                                int h,
+                                WeatherHourlyWidgets &widgets) {
+    widgets.card = lv_obj_create(parent);
+    lv_obj_set_size(widgets.card, w, h);
+    lv_obj_set_pos(widgets.card, x, y);
+    style_box(widgets.card, theme().panel_alt, 10, 1);
+    widgets.accent = icon_piece(widgets.card, 0, 0, w, 3, theme().accent, 1);
+    widgets.time = label(widgets.card, "--", &lv_font_montserrat_12, theme().muted, w - 12);
+    if (widgets.time) lv_obj_set_style_text_align(widgets.time, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    set_pos_if(widgets.time, 6, 6);
+    widgets.icon = create_weather_image(widgets.card, 44);
+    set_pos_if(widgets.icon, 7, 29);
+    widgets.temp = label(widgets.card, "--", &lv_font_montserrat_18, theme().text, w - 58);
+    set_pos_if(widgets.temp, 56, 29);
+    widgets.precip = label(widgets.card, "", &lv_font_montserrat_12, 0x60A5FA, w - 58);
+    set_pos_if(widgets.precip, 56, 56);
 }
 
 void create_weather_dashboard() {
-    lv_obj_t *page = lv_obj_create(g_screen);
-    if (!page) return;
-    lv_obj_set_size(page, SCREEN_W - 16, PAGE_H);
-    lv_obj_set_pos(page, 8, PAGE_Y);
-    style_box(page, theme().panel, 14, 1);
-    lv_obj_set_style_pad_all(page, 12, LV_PART_MAIN);
-    lv_obj_remove_flag(page, LV_OBJ_FLAG_SCROLLABLE);
-
     constexpr int CONTENT_W = 1228;
+    constexpr int HERO_Y = 48;
+    constexpr int HERO_H = 150;
 
+    g_weather_widgets = {};
+    g_weather_widgets.page = lv_obj_create(g_screen);
+    lv_obj_set_size(g_weather_widgets.page, SCREEN_W - 16, PAGE_H);
+    lv_obj_set_pos(g_weather_widgets.page, 8, PAGE_Y);
+    style_box(g_weather_widgets.page, theme().panel, 14, 1);
+    lv_obj_set_style_pad_all(g_weather_widgets.page, 12, LV_PART_MAIN);
+    lv_obj_remove_flag(g_weather_widgets.page, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *title = label(g_weather_widgets.page, "Weather", &lv_font_montserrat_24,
+                            theme().text, 240);
+    set_pos_if(title, 0, 0);
+    g_weather_widgets.updated = label(g_weather_widgets.page, "", &lv_font_montserrat_12,
+                                      theme().muted, 500);
+    set_pos_if(g_weather_widgets.updated, 250, 8);
+    lv_obj_t *refresh = button(g_weather_widgets.page, "Refresh", 104, 36, false,
+                               &lv_font_montserrat_14);
+    set_pos_if(refresh, 1124, 0);
+    lv_obj_add_event_cb(refresh, weather_refresh_cb, LV_EVENT_CLICKED, nullptr);
+
+    g_weather_widgets.message = label(g_weather_widgets.page, "", &lv_font_montserrat_20,
+                                      theme().muted, 1120);
+    lv_label_set_long_mode(g_weather_widgets.message, LV_LABEL_LONG_WRAP);
+    lv_obj_set_height(g_weather_widgets.message, 140);
+    set_pos_if(g_weather_widgets.message, 18, 88);
+
+    g_weather_widgets.content = lv_obj_create(g_weather_widgets.page);
+    lv_obj_set_size(g_weather_widgets.content, CONTENT_W, PAGE_H - 60);
+    lv_obj_set_pos(g_weather_widgets.content, 0, 40);
+    lv_obj_set_style_bg_opa(g_weather_widgets.content, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(g_weather_widgets.content, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(g_weather_widgets.content, 0, LV_PART_MAIN);
+    lv_obj_remove_flag(g_weather_widgets.content, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Current conditions hero -------------------------------------------------
+    lv_obj_t *hero = lv_obj_create(g_weather_widgets.content);
+    lv_obj_set_size(hero, CONTENT_W, HERO_H);
+    lv_obj_set_pos(hero, 0, HERO_Y - 40);
+    style_box(hero, theme().panel_alt, 16, 1);
+    g_weather_widgets.hero_accent = icon_piece(hero, 0, 0, CONTENT_W, 5, theme().accent, 2);
+    g_weather_widgets.hero_icon = create_weather_image(hero, 96);
+    set_pos_if(g_weather_widgets.hero_icon, 24, 27);
+    g_weather_widgets.hero_temp = label(hero, "--", &lv_font_montserrat_28, theme().text, 210);
+    set_pos_if(g_weather_widgets.hero_temp, 142, 25);
+    g_weather_widgets.hero_condition = label(hero, "--", &lv_font_montserrat_18, theme().muted, 235);
+    set_pos_if(g_weather_widgets.hero_condition, 144, 66);
+    g_weather_widgets.hero_range = label(hero, "--", &lv_font_montserrat_16, theme().text, 235);
+    set_pos_if(g_weather_widgets.hero_range, 144, 100);
+
+    constexpr int METRIC_X = 398;
+    constexpr int METRIC_Y = 23;
+    constexpr int METRIC_W = 196;
+    constexpr int METRIC_H = 104;
+    constexpr int METRIC_GAP = 10;
+    create_weather_metric_card(hero, METRIC_X + 0 * (METRIC_W + METRIC_GAP), METRIC_Y,
+                               METRIC_W, METRIC_H, "HUMIDITY", 0x38BDF8, g_weather_widgets.metrics[0]);
+    create_weather_metric_card(hero, METRIC_X + 1 * (METRIC_W + METRIC_GAP), METRIC_Y,
+                               METRIC_W, METRIC_H, "WIND", 0x60A5FA, g_weather_widgets.metrics[1]);
+    create_weather_metric_card(hero, METRIC_X + 2 * (METRIC_W + METRIC_GAP), METRIC_Y,
+                               METRIC_W, METRIC_H, "PRECIP", 0x3B82F6, g_weather_widgets.metrics[2]);
+    create_weather_metric_card(hero, METRIC_X + 3 * (METRIC_W + METRIC_GAP), METRIC_Y,
+                               METRIC_W, METRIC_H, "PRESSURE", 0xA78BFA, g_weather_widgets.metrics[3]);
+
+    // Six-day forecast ---------------------------------------------------------
+    constexpr int DAILY_HEADING_Y = 166;
+    constexpr int DAILY_Y = 188;
+    constexpr int DAILY_H = 148;
+    constexpr int DAILY_W = 198;
+    constexpr int DAILY_GAP = 8;
+    g_weather_widgets.daily_heading = label(g_weather_widgets.content, "Daily",
+                                             &lv_font_montserrat_18, theme().text, 160);
+    set_pos_if(g_weather_widgets.daily_heading, 0, DAILY_HEADING_Y);
+    const int daily_row_w = 6 * DAILY_W + 5 * DAILY_GAP;
+    const int daily_start_x = (CONTENT_W - daily_row_w) / 2;
+    for (int i = 0; i < 6; ++i) {
+        create_weather_daily_card(g_weather_widgets.content,
+                                  daily_start_x + i * (DAILY_W + DAILY_GAP), DAILY_Y,
+                                  DAILY_W, DAILY_H, g_weather_widgets.daily[i]);
+    }
+
+    // 18-hour forecast ---------------------------------------------------------
+    constexpr int HOURLY_HEADING_Y = 348;
+    constexpr int HOURLY_Y = 370;
+    constexpr int HOURLY_W = 128;
+    constexpr int HOURLY_H = 84;
+    constexpr int HOURLY_GAP = 8;
+    constexpr int HOURLY_ROW_GAP = 7;
+    constexpr int HOURLY_PER_ROW = 9;
+    g_weather_widgets.hourly_heading = label(g_weather_widgets.content, "Next 18 hours",
+                                              &lv_font_montserrat_18, theme().text, 220);
+    set_pos_if(g_weather_widgets.hourly_heading, 0, HOURLY_HEADING_Y);
+    const int hourly_row_w = HOURLY_PER_ROW * HOURLY_W + (HOURLY_PER_ROW - 1) * HOURLY_GAP;
+    const int hourly_start_x = (CONTENT_W - hourly_row_w) / 2;
+    for (int i = 0; i < 18; ++i) {
+        const int row = i / HOURLY_PER_ROW;
+        const int col = i % HOURLY_PER_ROW;
+        create_weather_hourly_card(g_weather_widgets.content,
+                                   hourly_start_x + col * (HOURLY_W + HOURLY_GAP),
+                                   HOURLY_Y + row * (HOURLY_H + HOURLY_ROW_GAP),
+                                   HOURLY_W, HOURLY_H, g_weather_widgets.hourly[i]);
+    }
+}
+
+void update_weather_dashboard() {
+    if (!g_weather_widgets.page) return;
     weather_service_get_snapshot(g_weather_snapshot);
     const WeatherSnapshot &weather = g_weather_snapshot;
 
-    ESP_LOGI("FamilyCalendar",
-             "[WeatherUI] Build start heap=%u daily=%u hourly=%u has_data=%d",
-             static_cast<unsigned>(ESP.getFreeHeap()),
-             static_cast<unsigned>(weather.daily_count),
-             static_cast<unsigned>(weather.hourly_count),
-             weather.has_data ? 1 : 0);
-
-    lv_obj_t *title = label(page, "Weather", &lv_font_montserrat_24, theme().text, 240);
-    set_pos_if(title, 0, 0);
-
-    char updated_text[96];
+    char updated_text[128];
     if (weather.last_updated_epoch > 0) {
         char updated_time[24] = "--";
         time_service_format_time(weather.last_updated_epoch, updated_time, sizeof(updated_time));
         snprintf(updated_text, sizeof(updated_text), "Updated %s%s",
-                 updated_time,
-                 weather.in_progress ? "  |  refreshing" : "");
+                 updated_time, weather.in_progress ? "  |  refreshing" : "");
     } else {
         snprintf(updated_text, sizeof(updated_text), "%s", weather.status);
     }
-    lv_obj_t *updated = label(page, updated_text, &lv_font_montserrat_12, theme().muted, 420);
-    set_pos_if(updated, 250, 8);
-
-    lv_obj_t *refresh = button(page, "Refresh", 104, 36, false, &lv_font_montserrat_14);
-    set_pos_if(refresh, 1124, 0);
-    if (refresh) lv_obj_add_event_cb(refresh, weather_refresh_cb, LV_EVENT_CLICKED, nullptr);
+    set_label_text(g_weather_widgets.updated, updated_text);
 
     if (!weather.configured) {
-        lv_obj_t *card = lv_obj_create(page);
-        if (!card) return;
-        lv_obj_set_size(card, CONTENT_W, 210);
-        lv_obj_set_pos(card, 0, 52);
-        style_box(card, theme().panel_alt, 14, 1);
-        lv_obj_set_style_pad_all(card, 20, LV_PART_MAIN);
-
-        lv_obj_t *heading = label(card, "Weather is not configured", &lv_font_montserrat_24, theme().text, 700);
-        set_pos_if(heading, 0, 0);
-        lv_obj_t *body = label(card,
-                               "Configure the Home Assistant weather snapshot script and HA_WEATHER_ENTITY, then refresh.",
-                               &lv_font_montserrat_16,
-                               theme().muted,
-                               1120);
-        if (body) lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
-        set_height_if(body, 100);
-        set_pos_if(body, 0, 58);
+        lv_obj_add_flag(g_weather_widgets.content, LV_OBJ_FLAG_HIDDEN);
+        set_label_text(g_weather_widgets.message,
+                       "Weather is not configured. Configure the Home Assistant weather snapshot script and HA_WEATHER_ENTITY, then refresh.");
+        lv_obj_remove_flag(g_weather_widgets.message, LV_OBJ_FLAG_HIDDEN);
         return;
     }
 
     if (!weather.has_data && !weather.in_progress) {
         weather_service_request_refresh(false, "weather tab open");
     }
-
     if (!weather.has_data) {
-        lv_obj_t *loading = label(page,
-                                  weather.in_progress ? "Loading weather snapshot..." : "Weather refresh queued...",
-                                  &lv_font_montserrat_20,
-                                  theme().muted,
-                                  520);
-        set_pos_if(loading, 0, 90);
+        lv_obj_add_flag(g_weather_widgets.content, LV_OBJ_FLAG_HIDDEN);
+        set_label_text(g_weather_widgets.message,
+                       weather.in_progress ? "Loading weather snapshot..." : "Weather refresh queued...");
+        lv_obj_remove_flag(g_weather_widgets.message, LV_OBJ_FLAG_HIDDEN);
         return;
     }
 
-    // Current conditions hero -------------------------------------------------
-    constexpr int HERO_Y = 48;
-    constexpr int HERO_H = 152;
-    lv_obj_t *hero = lv_obj_create(page);
-    if (!hero) return;
-    lv_obj_set_size(hero, CONTENT_W, HERO_H);
-    lv_obj_set_pos(hero, 0, HERO_Y);
-    style_box(hero, theme().panel_alt, 16, 1);
+    lv_obj_add_flag(g_weather_widgets.message, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(g_weather_widgets.content, LV_OBJ_FLAG_HIDDEN);
 
     const uint32_t hero_accent = weather_condition_accent(weather.current.condition);
-    icon_piece(hero, 0, 0, CONTENT_W, 5, hero_accent, 2);
+    if (g_weather_widgets.hero_accent) {
+        lv_obj_set_style_bg_color(g_weather_widgets.hero_accent, lv_color_hex(hero_accent), LV_PART_MAIN);
+    }
+    set_weather_image(g_weather_widgets.hero_icon, weather.current.condition, weather.current.symbol_code);
 
-    lv_obj_t *current_icon = create_weather_icon(hero,
-                                                 weather.current.condition,
-                                                 96,
-                                                 theme().text,
-                                                 theme().accent,
-                                                 weather.current.symbol_code);
-    set_pos_if(current_icon, 24, 28);
-
-    char current_temp_text[32];
+    char buffer[96];
     if (isfinite(weather.current.temperature_c)) {
-        snprintf(current_temp_text, sizeof(current_temp_text), "%d %s",
-                 rounded_display_temp(weather.current.temperature_c),
+        snprintf(buffer, sizeof(buffer), "%d %s", rounded_display_temp(weather.current.temperature_c),
                  weather_temperature_unit());
     } else {
-        snprintf(current_temp_text, sizeof(current_temp_text), "-- %s", weather_temperature_unit());
+        snprintf(buffer, sizeof(buffer), "-- %s", weather_temperature_unit());
     }
-    lv_obj_t *current_temp = label(hero, current_temp_text, &lv_font_montserrat_28, theme().text, 210);
-    set_pos_if(current_temp, 142, 26);
-
-    lv_obj_t *condition = label(hero,
-                                weather_condition_label(weather.current.condition),
-                                &lv_font_montserrat_18,
-                                theme().muted,
-                                235);
-    set_pos_if(condition, 144, 67);
-
-    char hi_low[48];
+    set_label_text(g_weather_widgets.hero_temp, buffer);
+    set_label_text(g_weather_widgets.hero_condition, weather_condition_label(weather.current.condition));
     if (isfinite(weather.current.today_high_c) && isfinite(weather.current.today_low_c)) {
-        snprintf(hi_low, sizeof(hi_low), "H %d   L %d %s",
+        snprintf(buffer, sizeof(buffer), "H %d   L %d %s",
                  rounded_display_temp(weather.current.today_high_c),
-                 rounded_display_temp(weather.current.today_low_c),
-                 weather_temperature_unit());
+                 rounded_display_temp(weather.current.today_low_c), weather_temperature_unit());
     } else {
-        snprintf(hi_low, sizeof(hi_low), "H --   L -- %s", weather_temperature_unit());
+        snprintf(buffer, sizeof(buffer), "H --   L -- %s", weather_temperature_unit());
     }
-    lv_obj_t *range = label(hero, hi_low, &lv_font_montserrat_16, theme().text, 235);
-    set_pos_if(range, 144, 101);
+    set_label_text(g_weather_widgets.hero_range, buffer);
 
-    char humidity_value[32];
-    snprintf(humidity_value, sizeof(humidity_value),
-             weather.current.humidity_pct >= 0 ? "%d%%" : "--",
-             weather.current.humidity_pct >= 0 ? weather.current.humidity_pct : 0);
+    if (weather.current.humidity_pct >= 0) snprintf(buffer, sizeof(buffer), "%d%%", weather.current.humidity_pct);
+    else snprintf(buffer, sizeof(buffer), "--");
+    set_label_text(g_weather_widgets.metrics[0].value, buffer);
 
-    char wind_value[64];
     if (isfinite(weather.current.wind_mps)) {
-        snprintf(wind_value, sizeof(wind_value), "%.1f %s %s",
-                 weather_display_wind(weather.current.wind_mps),
-                 weather_wind_unit(),
-                 wind_direction_text(weather.current.wind_direction_deg));
-    } else {
-        snprintf(wind_value, sizeof(wind_value), "--");
-    }
+        snprintf(buffer, sizeof(buffer), "%.1f %s %s", weather_display_wind(weather.current.wind_mps),
+                 weather_wind_unit(), wind_direction_text(weather.current.wind_direction_deg));
+    } else snprintf(buffer, sizeof(buffer), "--");
+    set_label_text(g_weather_widgets.metrics[1].value, buffer);
 
-    char precip_value[64];
     if (weather.current.precipitation_probability_pct >= 0) {
-        snprintf(precip_value, sizeof(precip_value), "%.2f %s  %d%%",
-                 weather_display_precip(weather.current.precipitation_mm),
-                 weather_precip_unit(),
-                 weather.current.precipitation_probability_pct);
+        snprintf(buffer, sizeof(buffer), "%.2f %s  %d%%", weather_display_precip(weather.current.precipitation_mm),
+                 weather_precip_unit(), weather.current.precipitation_probability_pct);
     } else {
-        snprintf(precip_value, sizeof(precip_value), "%.2f %s",
-                 weather_display_precip(weather.current.precipitation_mm),
+        snprintf(buffer, sizeof(buffer), "%.2f %s", weather_display_precip(weather.current.precipitation_mm),
                  weather_precip_unit());
     }
+    set_label_text(g_weather_widgets.metrics[2].value, buffer);
 
-    char pressure_value[48];
     if (isfinite(weather.current.pressure_hpa)) {
 #if WEATHER_USE_IMPERIAL
-        snprintf(pressure_value, sizeof(pressure_value), "%.2f %s",
-                 weather_display_pressure(weather.current.pressure_hpa),
+        snprintf(buffer, sizeof(buffer), "%.2f %s", weather_display_pressure(weather.current.pressure_hpa),
                  weather_pressure_unit());
 #else
-        snprintf(pressure_value, sizeof(pressure_value), "%.0f %s",
-                 weather_display_pressure(weather.current.pressure_hpa),
+        snprintf(buffer, sizeof(buffer), "%.0f %s", weather_display_pressure(weather.current.pressure_hpa),
                  weather_pressure_unit());
 #endif
-    } else {
-        snprintf(pressure_value, sizeof(pressure_value), "--");
-    }
+    } else snprintf(buffer, sizeof(buffer), "--");
+    set_label_text(g_weather_widgets.metrics[3].value, buffer);
 
-    constexpr int METRIC_X = 398;
-    constexpr int METRIC_Y = 24;
-    constexpr int METRIC_W = 196;
-    constexpr int METRIC_H = 104;
-    constexpr int METRIC_GAP = 10;
-    create_weather_metric_card(hero, METRIC_X + 0 * (METRIC_W + METRIC_GAP), METRIC_Y,
-                               METRIC_W, METRIC_H, "HUMIDITY", humidity_value, 0x38BDF8);
-    create_weather_metric_card(hero, METRIC_X + 1 * (METRIC_W + METRIC_GAP), METRIC_Y,
-                               METRIC_W, METRIC_H, "WIND", wind_value, 0x60A5FA);
-    create_weather_metric_card(hero, METRIC_X + 2 * (METRIC_W + METRIC_GAP), METRIC_Y,
-                               METRIC_W, METRIC_H, "PRECIP", precip_value, 0x3B82F6);
-    create_weather_metric_card(hero, METRIC_X + 3 * (METRIC_W + METRIC_GAP), METRIC_Y,
-                               METRIC_W, METRIC_H, "PRESSURE", pressure_value, 0xA78BFA);
-
-    ESP_LOGI("FamilyCalendar", "[WeatherUI] Hero complete heap=%u",
-             static_cast<unsigned>(ESP.getFreeHeap()));
-
-    // Six-day graphical forecast ---------------------------------------------
-    constexpr int DAILY_HEADING_Y = 214;
-    constexpr int DAILY_Y = 238;
-    constexpr int DAILY_H = 148;
-    constexpr int DAILY_W = 198;
-    constexpr int DAILY_GAP = 8;
-
-    lv_obj_t *daily_heading = label(page, "Daily", &lv_font_montserrat_18, theme().text, 160);
-    set_pos_if(daily_heading, 0, DAILY_HEADING_Y);
-
-    size_t daily_cards = weather.daily_count;
-    if (daily_cards > 6) daily_cards = 6;
-    if (daily_cards == 0) {
-        lv_obj_t *none = label(page, "No daily forecast available", &lv_font_montserrat_14, theme().muted, 360);
-        set_pos_if(none, 0, DAILY_Y + 24);
-    } else {
-        const int row_width = static_cast<int>(daily_cards) * DAILY_W +
-                              static_cast<int>(daily_cards - 1) * DAILY_GAP;
-        const int start_x = (CONTENT_W - row_width) / 2;
-        for (size_t i = 0; i < daily_cards; ++i) {
-            create_weather_daily_card(page,
-                                      weather.daily[i],
-                                      start_x + static_cast<int>(i) * (DAILY_W + DAILY_GAP),
-                                      DAILY_Y,
-                                      DAILY_W,
-                                      DAILY_H);
+    static const char *short_days[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+    size_t daily_count = weather.daily_count > 6 ? 6 : weather.daily_count;
+    for (size_t i = 0; i < 6; ++i) {
+        WeatherDailyWidgets &widgets = g_weather_widgets.daily[i];
+        if (i >= daily_count || !weather.daily[i].valid) {
+            lv_obj_add_flag(widgets.card, LV_OBJ_FLAG_HIDDEN);
+            continue;
         }
-    }
-
-    ESP_LOGI("FamilyCalendar", "[WeatherUI] Daily complete heap=%u",
-             static_cast<unsigned>(ESP.getFreeHeap()));
-
-    // Twelve-hour lightweight forecast ---------------------------------------
-    constexpr int HOURLY_HEADING_Y = 402;
-    constexpr int HOURLY_Y = 428;
-    constexpr int HOURLY_W = 198;
-    constexpr int HOURLY_H = 90;
-    constexpr int HOURLY_GAP = 8;
-    constexpr int HOURLY_ROW_GAP = 8;
-    constexpr size_t HOURLY_PER_ROW = 6;
-
-    lv_obj_t *hourly_heading = label(page, "Next 12 hours", &lv_font_montserrat_18, theme().text, 220);
-    set_pos_if(hourly_heading, 0, HOURLY_HEADING_Y);
-
-    size_t hourly_cards = weather.hourly_count;
-    if (hourly_cards > 12) hourly_cards = 12;
-    if (hourly_cards == 0) {
-        lv_obj_t *none = label(page, "No hourly forecast available", &lv_font_montserrat_14, theme().muted, 360);
-        set_pos_if(none, 0, HOURLY_Y + 24);
-    } else {
-        for (size_t i = 0; i < hourly_cards; ++i) {
-            const size_t row = i / HOURLY_PER_ROW;
-            const size_t column = i % HOURLY_PER_ROW;
-            const int x = static_cast<int>(column) * (HOURLY_W + HOURLY_GAP);
-            const int y = HOURLY_Y + static_cast<int>(row) * (HOURLY_H + HOURLY_ROW_GAP);
-            create_weather_hourly_card(page, weather.hourly[i], x, y, HOURLY_W, HOURLY_H);
+        const WeatherDayForecast &day = weather.daily[i];
+        struct tm day_tm = {};
+        char day_name[12] = "Day";
+        if (localtime_r(&day.local_day_epoch, &day_tm) && day_tm.tm_wday >= 0 && day_tm.tm_wday <= 6) {
+            snprintf(day_name, sizeof(day_name), "%s", short_days[day_tm.tm_wday]);
         }
+        set_label_text(widgets.day, day_name);
+        set_weather_image(widgets.icon, day.condition, day.symbol_code);
+        set_label_text(widgets.condition, weather_condition_label(day.condition));
+        if (isfinite(day.high_c) && isfinite(day.low_c)) {
+            snprintf(buffer, sizeof(buffer), "%d / %d %s", rounded_display_temp(day.high_c),
+                     rounded_display_temp(day.low_c), weather_temperature_unit());
+        } else snprintf(buffer, sizeof(buffer), "-- / -- %s", weather_temperature_unit());
+        set_label_text(widgets.temps, buffer);
+        const uint32_t accent = weather_condition_accent(day.condition);
+        lv_obj_set_style_bg_color(widgets.accent, lv_color_hex(accent), LV_PART_MAIN);
+        lv_obj_set_style_text_color(widgets.temps, lv_color_hex(accent), LV_PART_MAIN);
+        lv_obj_remove_flag(widgets.card, LV_OBJ_FLAG_HIDDEN);
     }
 
-    ESP_LOGI("FamilyCalendar", "[WeatherUI] Build complete heap=%u",
-             static_cast<unsigned>(ESP.getFreeHeap()));
+    size_t hourly_count = weather.hourly_count > 18 ? 18 : weather.hourly_count;
+    for (size_t i = 0; i < 18; ++i) {
+        WeatherHourlyWidgets &widgets = g_weather_widgets.hourly[i];
+        if (i >= hourly_count || !weather.hourly[i].valid) {
+            lv_obj_add_flag(widgets.card, LV_OBJ_FLAG_HIDDEN);
+            continue;
+        }
+        const WeatherHourForecast &hour = weather.hourly[i];
+        char time_text[16];
+        time_service_format_time(hour.epoch, time_text, sizeof(time_text));
+        set_label_text(widgets.time, time_text);
+        set_weather_image(widgets.icon, hour.condition, hour.symbol_code);
+        if (isfinite(hour.temperature_c)) snprintf(buffer, sizeof(buffer), "%d %s",
+                                                    rounded_display_temp(hour.temperature_c), weather_temperature_unit());
+        else snprintf(buffer, sizeof(buffer), "-- %s", weather_temperature_unit());
+        set_label_text(widgets.temp, buffer);
+        if (hour.precipitation_probability_pct >= 0) {
+            snprintf(buffer, sizeof(buffer), "%d%% rain", hour.precipitation_probability_pct);
+        } else if (hour.precipitation_mm > 0.0f) {
+            snprintf(buffer, sizeof(buffer), "%.2f %s", weather_display_precip(hour.precipitation_mm), weather_precip_unit());
+        } else {
+            buffer[0] = '\0';
+        }
+        set_label_text(widgets.precip, buffer);
+        lv_obj_set_style_bg_color(widgets.accent,
+                                  lv_color_hex(weather_condition_accent(hour.condition)), LV_PART_MAIN);
+        lv_obj_remove_flag(widgets.card, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    ESP_LOGI("FamilyCalendar",
+             "[WeatherUI] Updated in place: daily=%u hourly=%u free heap=%u free PSRAM=%u",
+             static_cast<unsigned>(daily_count), static_cast<unsigned>(hourly_count),
+             static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getFreePsram()));
 }
-
 
 void home_sync_cb(lv_event_t *) {
     home_assistant_request_sync();
@@ -2307,115 +2328,116 @@ void alarm_select_panel_cb(lv_event_t *e) {
     request_rebuild();
 }
 
-void create_alarm_panel_picker(lv_obj_t *page) {
-    home_assistant_request_alarm_discovery();
-
-    lv_obj_t *title = label(page, "Choose an Alarmo panel", &lv_font_montserrat_24, theme().text, 620);
-    lv_obj_set_pos(title, 0, 0);
-    lv_obj_t *description = label(
-        page,
-        "Select the Home Assistant alarm_control_panel entity managed by Alarmo.  The selection is saved on this display.",
-        &lv_font_montserrat_14,
-        theme().muted,
-        940);
-    lv_label_set_long_mode(description, LV_LABEL_LONG_WRAP);
-    lv_obj_set_pos(description, 0, 40);
-
-    if (alarm_service_configured()) {
-        lv_obj_t *back = button(page, "Back", 100, 40, false, &lv_font_montserrat_14);
-        lv_obj_set_pos(back, 1110, 8);
-        lv_obj_add_event_cb(back, alarm_cancel_panel_cb, LV_EVENT_CLICKED, nullptr);
-    }
-
-    if (!home_assistant_alarm_panels_ready()) {
-        lv_obj_t *loading = label(page, "Discovering Alarmo panels in Home Assistant...",
-                                  &lv_font_montserrat_18, theme().muted, 760);
-        lv_obj_set_pos(loading, 0, 120);
-        return;
-    }
-
-    const size_t count = home_assistant_alarm_panel_count();
-    if (count == 0) {
-        lv_obj_t *empty = label(page,
-            "No Alarmo alarm_control_panel entities were found.  Confirm Alarmo is loaded in Home Assistant, then tap this dashboard again.",
-            &lv_font_montserrat_18, theme().muted, 980);
-        lv_label_set_long_mode(empty, LV_LABEL_LONG_WRAP);
-        lv_obj_set_pos(empty, 0, 120);
-        return;
-    }
-
-    constexpr int CARD_W = 580;
-    constexpr int CARD_H = 84;
-    constexpr int GAP_X = 28;
-    constexpr int GAP_Y = 14;
-    constexpr int START_Y = 104;
-    for (size_t i = 0; i < count; ++i) {
-        const int column = static_cast<int>(i % 2);
-        const int row = static_cast<int>(i / 2);
-        lv_obj_t *card = lv_button_create(page);
-        lv_obj_set_size(card, CARD_W, CARD_H);
-        lv_obj_set_pos(card, column * (CARD_W + GAP_X), START_Y + row * (CARD_H + GAP_Y));
-        style_box(card, theme().panel_alt, 12, 1);
-        lv_obj_set_style_pad_all(card, 14, LV_PART_MAIN);
-
-        lv_obj_t *name = label(card, home_assistant_alarm_panel_name(i), &lv_font_montserrat_18,
-                               theme().text, CARD_W - 28);
-        lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
-        lv_obj_set_pos(name, 0, 4);
-        lv_obj_t *entity = label(card, home_assistant_alarm_panel_entity(i), &lv_font_montserrat_12,
-                                 theme().muted, CARD_W - 28);
-        lv_label_set_long_mode(entity, LV_LABEL_LONG_DOT);
-        lv_obj_set_pos(entity, 0, 42);
-        lv_obj_add_event_cb(card, alarm_select_panel_cb, LV_EVENT_CLICKED,
-                            reinterpret_cast<void *>(static_cast<intptr_t>(i)));
-    }
-}
-
-void disable_button(lv_obj_t *btn) {
+void set_alarm_button_enabled(lv_obj_t *btn, bool enabled) {
     if (!btn) return;
-    lv_obj_remove_flag(btn, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_opa(btn, LV_OPA_40, LV_PART_MAIN);
+    if (enabled) {
+        lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_opa(btn, LV_OPA_COVER, LV_PART_MAIN);
+    } else {
+        lv_obj_remove_flag(btn, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_opa(btn, LV_OPA_40, LV_PART_MAIN);
+    }
 }
 
 void create_alarm_dashboard() {
-    lv_obj_t *page = lv_obj_create(g_screen);
-    lv_obj_set_size(page, SCREEN_W - 16, PAGE_H);
-    lv_obj_set_pos(page, 8, PAGE_Y);
-    style_box(page, theme().panel, 14, 1);
-    lv_obj_set_style_pad_all(page, 18, LV_PART_MAIN);
+    g_alarm_widgets = {};
+    g_alarm_widgets.page = lv_obj_create(g_screen);
+    lv_obj_set_size(g_alarm_widgets.page, SCREEN_W - 16, PAGE_H);
+    lv_obj_set_pos(g_alarm_widgets.page, 8, PAGE_Y);
+    style_box(g_alarm_widgets.page, theme().panel, 14, 1);
+    lv_obj_set_style_pad_all(g_alarm_widgets.page, 18, LV_PART_MAIN);
+    lv_obj_remove_flag(g_alarm_widgets.page, LV_OBJ_FLAG_SCROLLABLE);
 
-    if (!alarm_service_configured() || g_alarm_choose_panel) {
-        lv_obj_add_flag(page, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_scroll_dir(page, LV_DIR_VER);
-        create_alarm_panel_picker(page);
-        return;
+    constexpr int CONTENT_W = 1226;
+    constexpr int CONTENT_H = PAGE_H - 36;
+
+    // Persistent panel picker -------------------------------------------------
+    g_alarm_widgets.picker = lv_obj_create(g_alarm_widgets.page);
+    lv_obj_set_size(g_alarm_widgets.picker, CONTENT_W, CONTENT_H);
+    lv_obj_set_pos(g_alarm_widgets.picker, 0, 0);
+    lv_obj_set_style_bg_opa(g_alarm_widgets.picker, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(g_alarm_widgets.picker, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(g_alarm_widgets.picker, 0, LV_PART_MAIN);
+    lv_obj_add_flag(g_alarm_widgets.picker, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(g_alarm_widgets.picker, LV_DIR_VER);
+
+    lv_obj_t *picker_title = label(g_alarm_widgets.picker, "Choose an Alarmo panel",
+                                   &lv_font_montserrat_24, theme().text, 620);
+    lv_obj_set_pos(picker_title, 0, 0);
+    lv_obj_t *picker_desc = label(
+        g_alarm_widgets.picker,
+        "Select the Home Assistant alarm_control_panel entity managed by Alarmo. The selection is saved on this display.",
+        &lv_font_montserrat_14, theme().muted, 940);
+    lv_label_set_long_mode(picker_desc, LV_LABEL_LONG_WRAP);
+    lv_obj_set_pos(picker_desc, 0, 40);
+    g_alarm_widgets.picker_back = button(g_alarm_widgets.picker, "Back", 100, 40, false,
+                                         &lv_font_montserrat_14);
+    lv_obj_set_pos(g_alarm_widgets.picker_back, 1110, 8);
+    lv_obj_add_event_cb(g_alarm_widgets.picker_back, alarm_cancel_panel_cb, LV_EVENT_CLICKED, nullptr);
+    g_alarm_widgets.picker_status = label(g_alarm_widgets.picker, "", &lv_font_montserrat_18,
+                                          theme().muted, 980);
+    lv_label_set_long_mode(g_alarm_widgets.picker_status, LV_LABEL_LONG_WRAP);
+    lv_obj_set_pos(g_alarm_widgets.picker_status, 0, 120);
+
+    constexpr int PICK_W = 580;
+    constexpr int PICK_H = 84;
+    constexpr int PICK_GX = 28;
+    constexpr int PICK_GY = 14;
+    constexpr int PICK_Y = 104;
+    for (size_t i = 0; i < HA_MAX_ALARM_PANELS; ++i) {
+        PickerCardWidgets &slot = g_alarm_widgets.picker_cards[i];
+        const int col = static_cast<int>(i % 2);
+        const int row = static_cast<int>(i / 2);
+        slot.card = lv_button_create(g_alarm_widgets.picker);
+        lv_obj_set_size(slot.card, PICK_W, PICK_H);
+        lv_obj_set_pos(slot.card, col * (PICK_W + PICK_GX), PICK_Y + row * (PICK_H + PICK_GY));
+        style_box(slot.card, theme().panel_alt, 12, 1);
+        lv_obj_set_style_pad_all(slot.card, 14, LV_PART_MAIN);
+        slot.name = label(slot.card, "", &lv_font_montserrat_18, theme().text, PICK_W - 28);
+        lv_label_set_long_mode(slot.name, LV_LABEL_LONG_DOT);
+        lv_obj_set_pos(slot.name, 0, 4);
+        slot.entity = label(slot.card, "", &lv_font_montserrat_12, theme().muted, PICK_W - 28);
+        lv_label_set_long_mode(slot.entity, LV_LABEL_LONG_DOT);
+        lv_obj_set_pos(slot.entity, 0, 42);
+        lv_obj_add_event_cb(slot.card, alarm_select_panel_cb, LV_EVENT_CLICKED,
+                            reinterpret_cast<void *>(static_cast<intptr_t>(i)));
+        lv_obj_add_flag(slot.card, LV_OBJ_FLAG_HIDDEN);
     }
 
-    const AlarmoSnapshot *snapshot = alarm_service_snapshot();
-    if (!snapshot || !snapshot->valid) {
-        home_assistant_request_alarm_sync();
-        lv_obj_t *title = label(page, "Alarm & Security", &lv_font_montserrat_24, theme().text, 300);
-        lv_obj_set_pos(title, 0, 0);
-        lv_obj_t *loading = label(page, "Loading alarm state in the background...", &lv_font_montserrat_18,
-                                  theme().muted, 760);
-        lv_obj_set_pos(loading, 0, 70);
-        lv_obj_t *change = button(page, "Change panel", 140, 40, false, &lv_font_montserrat_14);
-        lv_obj_set_pos(change, 1060, 6);
-        lv_obj_add_event_cb(change, alarm_change_panel_cb, LV_EVENT_CLICKED, nullptr);
-        return;
-    }
+    // Persistent loading state ------------------------------------------------
+    g_alarm_widgets.loading = lv_obj_create(g_alarm_widgets.page);
+    lv_obj_set_size(g_alarm_widgets.loading, CONTENT_W, CONTENT_H);
+    lv_obj_set_pos(g_alarm_widgets.loading, 0, 0);
+    lv_obj_set_style_bg_opa(g_alarm_widgets.loading, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(g_alarm_widgets.loading, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(g_alarm_widgets.loading, 0, LV_PART_MAIN);
+    lv_obj_t *loading_title = label(g_alarm_widgets.loading, "Alarm & Security",
+                                    &lv_font_montserrat_24, theme().text, 300);
+    lv_obj_set_pos(loading_title, 0, 0);
+    lv_obj_t *loading_text = label(g_alarm_widgets.loading, "Loading alarm state in the background...",
+                                   &lv_font_montserrat_18, theme().muted, 760);
+    lv_obj_set_pos(loading_text, 0, 70);
+    lv_obj_t *loading_change = button(g_alarm_widgets.loading, "Change panel", 140, 40,
+                                      false, &lv_font_montserrat_14);
+    lv_obj_set_pos(loading_change, 1060, 6);
+    lv_obj_add_event_cb(loading_change, alarm_change_panel_cb, LV_EVENT_CLICKED, nullptr);
 
-    lv_obj_t *title = label(page, "Alarm & Security", &lv_font_montserrat_24, theme().text, 260);
+    // Persistent alarm dashboard ---------------------------------------------
+    g_alarm_widgets.main = lv_obj_create(g_alarm_widgets.page);
+    lv_obj_set_size(g_alarm_widgets.main, CONTENT_W, CONTENT_H);
+    lv_obj_set_pos(g_alarm_widgets.main, 0, 0);
+    lv_obj_set_style_bg_opa(g_alarm_widgets.main, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(g_alarm_widgets.main, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(g_alarm_widgets.main, 0, LV_PART_MAIN);
+    lv_obj_remove_flag(g_alarm_widgets.main, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *title = label(g_alarm_widgets.main, "Alarm & Security", &lv_font_montserrat_24,
+                            theme().text, 260);
     lv_obj_set_pos(title, 0, 0);
-    //lv_obj_t *source = label(page, snapshot->friendly_name, &lv_font_montserrat_14, theme().muted, 500);
-    //lv_obj_set_pos(source, 0, 38);
-    //lv_obj_t *auto_note = label(page, "Auto-refresh while visible: 15 sec", &lv_font_montserrat_12, theme().muted, 260);
-    //lv_obj_set_pos(auto_note, 520, 40);
-
-    lv_obj_t *refresh = button(page, "Refresh", 110, 40, false, &lv_font_montserrat_14);
+    lv_obj_t *refresh = button(g_alarm_widgets.main, "Refresh", 110, 40, false, &lv_font_montserrat_14);
     lv_obj_set_pos(refresh, 958, 4);
     lv_obj_add_event_cb(refresh, alarm_refresh_cb, LV_EVENT_CLICKED, nullptr);
-    lv_obj_t *change = button(page, "Change panel", 140, 40, false, &lv_font_montserrat_14);
+    lv_obj_t *change = button(g_alarm_widgets.main, "Change panel", 140, 40, false, &lv_font_montserrat_14);
     lv_obj_set_pos(change, 1082, 4);
     lv_obj_add_event_cb(change, alarm_change_panel_cb, LV_EVENT_CLICKED, nullptr);
 
@@ -2425,18 +2447,146 @@ void create_alarm_dashboard() {
     constexpr int CARD_Y = 78;
     constexpr int CARD_H = 512;
 
-    lv_obj_t *status_card = lv_obj_create(page);
+    lv_obj_t *status_card = lv_obj_create(g_alarm_widgets.main);
     lv_obj_set_size(status_card, STATUS_W, CARD_H);
     lv_obj_set_pos(status_card, 0, CARD_Y);
     style_box(status_card, theme().panel_alt, 16, 1);
     lv_obj_set_style_pad_all(status_card, 22, LV_PART_MAIN);
-
-    lv_obj_t *state_caption = label(status_card, "STATUS", &lv_font_montserrat_14, theme().muted, STATUS_W - 44);
+    lv_obj_t *state_caption = label(status_card, "STATUS", &lv_font_montserrat_14,
+                                    theme().muted, STATUS_W - 44);
     lv_obj_set_pos(state_caption, 0, 0);
-    lv_obj_t *state_label = label(status_card, friendly_alarm_state(snapshot->state), &lv_font_montserrat_28,
-                                  alarm_state_color(snapshot->state), STATUS_W - 44);
-    lv_label_set_long_mode(state_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_pos(state_label, 0, 34);
+    g_alarm_widgets.state = label(status_card, "--", &lv_font_montserrat_28,
+                                  theme().muted, STATUS_W - 44);
+    lv_label_set_long_mode(g_alarm_widgets.state, LV_LABEL_LONG_WRAP);
+    lv_obj_set_pos(g_alarm_widgets.state, 0, 34);
+    g_alarm_widgets.next = label(status_card, "", &lv_font_montserrat_14,
+                                 theme().muted, STATUS_W - 44);
+    lv_label_set_long_mode(g_alarm_widgets.next, LV_LABEL_LONG_WRAP);
+    lv_obj_set_height(g_alarm_widgets.next, 48);
+    lv_obj_set_pos(g_alarm_widgets.next, 0, 88);
+    lv_obj_t *sensor_caption = label(status_card, "ACTIVE SENSORS", &lv_font_montserrat_14,
+                                     theme().muted, STATUS_W - 44);
+    lv_obj_set_pos(sensor_caption, 0, 128);
+    g_alarm_widgets.sensors = label(status_card, "", &lv_font_montserrat_16,
+                                    theme().success, STATUS_W - 44);
+    lv_label_set_long_mode(g_alarm_widgets.sensors, LV_LABEL_LONG_WRAP);
+    lv_obj_set_height(g_alarm_widgets.sensors, 150);
+    lv_obj_set_pos(g_alarm_widgets.sensors, 0, 160);
+    lv_obj_t *last_caption = label(status_card, "LAST TRIGGERED", &lv_font_montserrat_14,
+                                   theme().muted, STATUS_W - 44);
+    lv_obj_set_pos(last_caption, 0, 336);
+    g_alarm_widgets.last = label(status_card, "", &lv_font_montserrat_16, theme().text, STATUS_W - 44);
+    lv_obj_set_pos(g_alarm_widgets.last, 0, 368);
+    g_alarm_widgets.code = label(status_card, "", &lv_font_montserrat_12, theme().muted, STATUS_W - 44);
+    lv_label_set_long_mode(g_alarm_widgets.code, LV_LABEL_LONG_WRAP);
+    lv_obj_set_pos(g_alarm_widgets.code, 0, 430);
+
+    lv_obj_t *controls = lv_obj_create(g_alarm_widgets.main);
+    lv_obj_set_size(controls, CONTROLS_W, CARD_H);
+    lv_obj_set_pos(controls, CONTROLS_X, CARD_Y);
+    style_box(controls, theme().panel_alt, 16, 1);
+    lv_obj_set_style_pad_all(controls, 22, LV_PART_MAIN);
+    lv_obj_t *control_title = label(controls, "ALARM CONTROLS", &lv_font_montserrat_14,
+                                    theme().muted, CONTROLS_W - 44);
+    lv_obj_set_pos(control_title, 0, 0);
+    lv_obj_t *hint = label(controls,
+        "Commands are sent to Alarmo in the background. Open sensors are never force-bypassed from this screen.",
+        &lv_font_montserrat_14, theme().muted, CONTROLS_W - 44);
+    lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
+    lv_obj_set_height(hint, 48);
+    lv_obj_set_pos(hint, 0, 30);
+
+    constexpr int BW = 338;
+    constexpr int BH = 74;
+    constexpr int GX = 18;
+    constexpr int BY = 104;
+    constexpr int GY = 18;
+    g_alarm_widgets.disarm = button(controls, "Disarm", BW, BH, false, &lv_font_montserrat_20);
+    lv_obj_set_pos(g_alarm_widgets.disarm, 0, BY);
+    lv_obj_add_event_cb(g_alarm_widgets.disarm, alarm_action_cb, LV_EVENT_CLICKED,
+                        reinterpret_cast<void *>(static_cast<intptr_t>(AlarmUiAction::Disarm)));
+    g_alarm_widgets.home = button(controls, "Arm Home", BW, BH, false, &lv_font_montserrat_20);
+    lv_obj_set_pos(g_alarm_widgets.home, BW + GX, BY);
+    lv_obj_add_event_cb(g_alarm_widgets.home, alarm_action_cb, LV_EVENT_CLICKED,
+                        reinterpret_cast<void *>(static_cast<intptr_t>(AlarmUiAction::ArmHome)));
+    g_alarm_widgets.away = button(controls, "Arm Away", BW, BH, false, &lv_font_montserrat_20);
+    lv_obj_set_pos(g_alarm_widgets.away, 0, BY + BH + GY);
+    lv_obj_add_event_cb(g_alarm_widgets.away, alarm_action_cb, LV_EVENT_CLICKED,
+                        reinterpret_cast<void *>(static_cast<intptr_t>(AlarmUiAction::ArmAway)));
+    g_alarm_widgets.night = button(controls, "Arm Night", BW, BH, false, &lv_font_montserrat_20);
+    lv_obj_set_pos(g_alarm_widgets.night, BW + GX, BY + BH + GY);
+    lv_obj_add_event_cb(g_alarm_widgets.night, alarm_action_cb, LV_EVENT_CLICKED,
+                        reinterpret_cast<void *>(static_cast<intptr_t>(AlarmUiAction::ArmNight)));
+    g_alarm_widgets.vacation = button(controls, "Arm Vacation", BW, BH, false, &lv_font_montserrat_20);
+    lv_obj_set_pos(g_alarm_widgets.vacation, 0, BY + (BH + GY) * 2);
+    lv_obj_add_event_cb(g_alarm_widgets.vacation, alarm_action_cb, LV_EVENT_CLICKED,
+                        reinterpret_cast<void *>(static_cast<intptr_t>(AlarmUiAction::ArmVacation)));
+    g_alarm_widgets.skip = button(controls, "Skip exit delay", BW, BH, true, &lv_font_montserrat_18);
+    lv_obj_set_pos(g_alarm_widgets.skip, BW + GX, BY + (BH + GY) * 2);
+    lv_obj_add_event_cb(g_alarm_widgets.skip, alarm_action_cb, LV_EVENT_CLICKED,
+                        reinterpret_cast<void *>(static_cast<intptr_t>(AlarmUiAction::SkipDelay)));
+    g_alarm_widgets.skip_info = label(controls, "", &lv_font_montserrat_14, theme().muted, BW);
+    lv_label_set_long_mode(g_alarm_widgets.skip_info, LV_LABEL_LONG_WRAP);
+    lv_obj_set_height(g_alarm_widgets.skip_info, BH);
+    lv_obj_set_pos(g_alarm_widgets.skip_info, BW + GX, BY + (BH + GY) * 2 + 10);
+    g_alarm_widgets.entity = label(controls, "", &lv_font_montserrat_12, theme().muted, CONTROLS_W - 44);
+    lv_label_set_long_mode(g_alarm_widgets.entity, LV_LABEL_LONG_DOT);
+    lv_obj_align(g_alarm_widgets.entity, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+}
+
+void update_alarm_dashboard() {
+    if (!g_alarm_widgets.page) return;
+    const bool picker_mode = !alarm_service_configured() || g_alarm_choose_panel;
+
+    if (picker_mode) {
+        lv_obj_remove_flag(g_alarm_widgets.picker, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(g_alarm_widgets.loading, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(g_alarm_widgets.main, LV_OBJ_FLAG_HIDDEN);
+        home_assistant_request_alarm_discovery();
+        if (alarm_service_configured()) lv_obj_remove_flag(g_alarm_widgets.picker_back, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_add_flag(g_alarm_widgets.picker_back, LV_OBJ_FLAG_HIDDEN);
+
+        size_t count = 0;
+        if (!home_assistant_alarm_panels_ready()) {
+            set_label_text(g_alarm_widgets.picker_status, "Discovering Alarmo panels in Home Assistant...");
+            lv_obj_remove_flag(g_alarm_widgets.picker_status, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            count = home_assistant_alarm_panel_count();
+            if (count > HA_MAX_ALARM_PANELS) count = HA_MAX_ALARM_PANELS;
+            if (count == 0) {
+                set_label_text(g_alarm_widgets.picker_status,
+                               "No alarm_control_panel entities were found. Confirm Alarmo is loaded in Home Assistant, then try again.");
+                lv_obj_remove_flag(g_alarm_widgets.picker_status, LV_OBJ_FLAG_HIDDEN);
+            } else {
+                lv_obj_add_flag(g_alarm_widgets.picker_status, LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+        for (size_t i = 0; i < HA_MAX_ALARM_PANELS; ++i) {
+            PickerCardWidgets &slot = g_alarm_widgets.picker_cards[i];
+            if (i < count) {
+                set_label_text(slot.name, home_assistant_alarm_panel_name(i));
+                set_label_text(slot.entity, home_assistant_alarm_panel_entity(i));
+                lv_obj_remove_flag(slot.card, LV_OBJ_FLAG_HIDDEN);
+            } else {
+                lv_obj_add_flag(slot.card, LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+        return;
+    }
+
+    lv_obj_add_flag(g_alarm_widgets.picker, LV_OBJ_FLAG_HIDDEN);
+    const AlarmoSnapshot *snapshot = alarm_service_snapshot();
+    if (!snapshot || !snapshot->valid) {
+        lv_obj_remove_flag(g_alarm_widgets.loading, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(g_alarm_widgets.main, LV_OBJ_FLAG_HIDDEN);
+        home_assistant_request_alarm_sync();
+        return;
+    }
+
+    lv_obj_add_flag(g_alarm_widgets.loading, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(g_alarm_widgets.main, LV_OBJ_FLAG_HIDDEN);
+    set_label_text(g_alarm_widgets.state, friendly_alarm_state(snapshot->state));
+    lv_obj_set_style_text_color(g_alarm_widgets.state, lv_color_hex(alarm_state_color(snapshot->state)), LV_PART_MAIN);
 
     char transition[120];
     if ((strcmp(snapshot->state, "arming") == 0 || strcmp(snapshot->state, "pending") == 0) && snapshot->delay_seconds > 0) {
@@ -2448,208 +2598,67 @@ void create_alarm_dashboard() {
     } else {
         snprintf(transition, sizeof(transition), "State synchronized with Home Assistant");
     }
-    lv_obj_t *next = label(status_card, transition, &lv_font_montserrat_14, theme().muted, STATUS_W - 44);
-    lv_label_set_long_mode(next, LV_LABEL_LONG_WRAP);
-    lv_obj_set_height(next, 48);
-    lv_obj_set_pos(next, 0, 88);
-
-    lv_obj_t *sensor_caption = label(
-        status_card,
-        "ACTIVE SENSORS",
-        &lv_font_montserrat_14,
-        theme().muted,
-        STATUS_W - 44
-    );
-    lv_obj_set_pos(sensor_caption, 0, 128);  //158
+    set_label_text(g_alarm_widgets.next, transition);
 
     char sensors[380] = {};
-
     if (snapshot->active_sensor_count == 0) {
-        snprintf(
-            sensors,
-            sizeof(sensors),
-            "All sensors clear"
-        );
+        snprintf(sensors, sizeof(sensors), "All sensors clear");
     } else {
-        const unsigned total =
-            snapshot->active_sensor_total > 0
-                ? static_cast<unsigned>(snapshot->active_sensor_total)
-                : static_cast<unsigned>(snapshot->active_sensor_count);
-
-        snprintf(
-            sensors,
-            sizeof(sensors),
-            "%u active",
-            total
-        );
-
+        const unsigned total = snapshot->active_sensor_total > 0
+                                   ? static_cast<unsigned>(snapshot->active_sensor_total)
+                                   : static_cast<unsigned>(snapshot->active_sensor_count);
+        snprintf(sensors, sizeof(sensors), "%u active", total);
         constexpr uint16_t MAX_DISPLAYED_SENSORS = 5;
-
-        const uint16_t display_count =
-            snapshot->active_sensor_count < MAX_DISPLAYED_SENSORS
-                ? snapshot->active_sensor_count
-                : MAX_DISPLAYED_SENSORS;
-
+        const uint16_t display_count = snapshot->active_sensor_count < MAX_DISPLAYED_SENSORS
+                                           ? snapshot->active_sensor_count
+                                           : MAX_DISPLAYED_SENSORS;
         for (uint16_t i = 0; i < display_count; ++i) {
-            const AlarmActiveSensor &sensor =
-                snapshot->active_sensors[i];
-
-            const bool motion =
-                strcmp(sensor.device_class, "motion") == 0;
-
-            const char *state_text =
-                motion ? "MOTION" : "OPEN";
-
+            const AlarmActiveSensor &sensor = snapshot->active_sensors[i];
+            const bool motion = strcmp(sensor.device_class, "motion") == 0;
             char line[128];
-
-            snprintf(
-                line,
-                sizeof(line),
-                "\n%s  -  %s",
-                sensor.name[0]
-                    ? sensor.name
-                    : sensor.entity_id,
-                state_text
-            );
-
-            strlcat(
-                sensors,
-                line,
-                sizeof(sensors)
-            );
+            snprintf(line, sizeof(line), "\n%s  -  %s",
+                     sensor.name[0] ? sensor.name : sensor.entity_id, motion ? "MOTION" : "OPEN");
+            strlcat(sensors, line, sizeof(sensors));
         }
-
         if (total > display_count) {
             char more[40];
-
-            snprintf(
-                more,
-                sizeof(more),
-                "\n+%u more",
-                total - display_count
-            );
-
-            strlcat(
-                sensors,
-                more,
-                sizeof(sensors)
-            );
+            snprintf(more, sizeof(more), "\n+%u more", total - display_count);
+            strlcat(sensors, more, sizeof(sensors));
         }
     }
+    set_label_text(g_alarm_widgets.sensors, sensors);
+    lv_obj_set_style_text_color(g_alarm_widgets.sensors,
+                                lv_color_hex(snapshot->active_sensor_count > 0
+                                                 ? (g_dark_mode ? 0xFBBF24 : 0xB45309)
+                                                 : theme().success),
+                                LV_PART_MAIN);
+    set_label_text(g_alarm_widgets.last,
+                   snapshot->last_triggered[0] ? snapshot->last_triggered : "No trigger recorded");
+    set_label_text(g_alarm_widgets.code,
+                   alarm_service_code_required() ? "PIN/code required for the next command"
+                                                 : "No code required for the next command");
+    set_label_text(g_alarm_widgets.entity, alarm_service_entity());
 
-    const uint32_t sensor_color =
-        snapshot->active_sensor_count > 0
-            ? (g_dark_mode ? 0xFBBF24 : 0xB45309)
-            : theme().success;
-
-    lv_obj_t *sensor_text = label(
-        status_card,
-        sensors,
-        &lv_font_montserrat_16,
-        sensor_color,
-        STATUS_W - 44
-    );
-
-    lv_label_set_long_mode(
-        sensor_text,
-        LV_LABEL_LONG_WRAP
-    );
-
-    lv_obj_set_height(
-        sensor_text,
-        150 //120
-    );
-
-    lv_obj_set_pos(
-        sensor_text,
-        0,
-        160 //190
-    );
-
-    lv_obj_t *last_caption = label(status_card, "LAST TRIGGERED", &lv_font_montserrat_14, theme().muted, STATUS_W - 44);
-    lv_obj_set_pos(last_caption, 0, 336);
-    lv_obj_t *last = label(status_card, snapshot->last_triggered[0] ? snapshot->last_triggered : "No trigger recorded",
-                           &lv_font_montserrat_16, theme().text, STATUS_W - 44);
-    lv_obj_set_pos(last, 0, 368);
-
-    const char *code_text = alarm_service_code_required()
-        ? "PIN/code required for the next command"
-        : "No code required for the next command";
-    lv_obj_t *code_label = label(status_card, code_text, &lv_font_montserrat_12, theme().muted, STATUS_W - 44);
-    lv_label_set_long_mode(code_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_pos(code_label, 0, 430);
-
-    lv_obj_t *controls = lv_obj_create(page);
-    lv_obj_set_size(controls, CONTROLS_W, CARD_H);
-    lv_obj_set_pos(controls, CONTROLS_X, CARD_Y);
-    style_box(controls, theme().panel_alt, 16, 1);
-    lv_obj_set_style_pad_all(controls, 22, LV_PART_MAIN);
-
-    lv_obj_t *control_title = label(controls, "ALARM CONTROLS", &lv_font_montserrat_14, theme().muted, CONTROLS_W - 44);
-    lv_obj_set_pos(control_title, 0, 0);
-    lv_obj_t *hint = label(controls,
-        "Commands are sent to Alarmo in the background.  Open sensors are never force-bypassed from this screen.",
-        &lv_font_montserrat_14, theme().muted, CONTROLS_W - 44);
-    lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
-    lv_obj_set_height(hint, 48);
-    lv_obj_set_pos(hint, 0, 30);
-
-    constexpr int BW = 338;
-    constexpr int BH = 74;
-    constexpr int GX = 18;
-    constexpr int BY = 104;
-    constexpr int GY = 18;
-
-    lv_obj_t *disarm = button(controls, "Disarm", BW, BH,
-                              strcmp(snapshot->state, "disarmed") != 0, &lv_font_montserrat_20);
-    lv_obj_set_pos(disarm, 0, BY);
-    lv_obj_add_event_cb(disarm, alarm_action_cb, LV_EVENT_CLICKED,
-                        reinterpret_cast<void *>(static_cast<intptr_t>(AlarmUiAction::Disarm)));
-    if (strcmp(snapshot->state, "disarmed") == 0) disable_button(disarm);
-
-    lv_obj_t *home = button(controls, "Arm Home", BW, BH, false, &lv_font_montserrat_20);
-    lv_obj_set_pos(home, BW + GX, BY);
-    lv_obj_add_event_cb(home, alarm_action_cb, LV_EVENT_CLICKED,
-                        reinterpret_cast<void *>(static_cast<intptr_t>(AlarmUiAction::ArmHome)));
-    if (!(snapshot->supported_features & 1U)) disable_button(home);
-
-    lv_obj_t *away = button(controls, "Arm Away", BW, BH, false, &lv_font_montserrat_20);
-    lv_obj_set_pos(away, 0, BY + BH + GY);
-    lv_obj_add_event_cb(away, alarm_action_cb, LV_EVENT_CLICKED,
-                        reinterpret_cast<void *>(static_cast<intptr_t>(AlarmUiAction::ArmAway)));
-    if (!(snapshot->supported_features & 2U)) disable_button(away);
-
-    lv_obj_t *night = button(controls, "Arm Night", BW, BH, false, &lv_font_montserrat_20);
-    lv_obj_set_pos(night, BW + GX, BY + BH + GY);
-    lv_obj_add_event_cb(night, alarm_action_cb, LV_EVENT_CLICKED,
-                        reinterpret_cast<void *>(static_cast<intptr_t>(AlarmUiAction::ArmNight)));
-    if (!(snapshot->supported_features & 4U)) disable_button(night);
-
-    lv_obj_t *vacation = button(controls, "Arm Vacation", BW, BH, false, &lv_font_montserrat_20);
-    lv_obj_set_pos(vacation, 0, BY + (BH + GY) * 2);
-    lv_obj_add_event_cb(vacation, alarm_action_cb, LV_EVENT_CLICKED,
-                        reinterpret_cast<void *>(static_cast<intptr_t>(AlarmUiAction::ArmVacation)));
-    if (!(snapshot->supported_features & 32U)) disable_button(vacation);
+    const bool disarmed = strcmp(snapshot->state, "disarmed") == 0;
+    set_alarm_button_enabled(g_alarm_widgets.disarm, !disarmed);
+    lv_obj_set_style_bg_color(g_alarm_widgets.disarm,
+                              lv_color_hex(!disarmed ? theme().accent : theme().button), LV_PART_MAIN);
+    set_alarm_button_enabled(g_alarm_widgets.home, (snapshot->supported_features & 1U) != 0);
+    set_alarm_button_enabled(g_alarm_widgets.away, (snapshot->supported_features & 2U) != 0);
+    set_alarm_button_enabled(g_alarm_widgets.night, (snapshot->supported_features & 4U) != 0);
+    set_alarm_button_enabled(g_alarm_widgets.vacation, (snapshot->supported_features & 32U) != 0);
 
     if (strcmp(snapshot->state, "arming") == 0) {
-        lv_obj_t *skip = button(controls, "Skip exit delay", BW, BH, true, &lv_font_montserrat_18);
-        lv_obj_set_pos(skip, BW + GX, BY + (BH + GY) * 2);
-        lv_obj_add_event_cb(skip, alarm_action_cb, LV_EVENT_CLICKED,
-                            reinterpret_cast<void *>(static_cast<intptr_t>(AlarmUiAction::SkipDelay)));
+        lv_obj_remove_flag(g_alarm_widgets.skip, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(g_alarm_widgets.skip_info, LV_OBJ_FLAG_HIDDEN);
     } else {
-        lv_obj_t *info = label(controls,
-            strcmp(snapshot->state, "pending") == 0
-                ? "Entry delay active - disarm to cancel the pending alarm."
-                : "Exit-delay control appears here while Alarmo is arming.",
-            &lv_font_montserrat_14, theme().muted, BW);
-        lv_label_set_long_mode(info, LV_LABEL_LONG_WRAP);
-        lv_obj_set_height(info, BH);
-        lv_obj_set_pos(info, BW + GX, BY + (BH + GY) * 2 + 10);
+        lv_obj_add_flag(g_alarm_widgets.skip, LV_OBJ_FLAG_HIDDEN);
+        set_label_text(g_alarm_widgets.skip_info,
+                       strcmp(snapshot->state, "pending") == 0
+                           ? "Entry delay active - disarm to cancel the pending alarm."
+                           : "Exit-delay control appears here while Alarmo is arming.");
+        lv_obj_remove_flag(g_alarm_widgets.skip_info, LV_OBJ_FLAG_HIDDEN);
     }
-
-    lv_obj_t *entity = label(controls, alarm_service_entity(), &lv_font_montserrat_12, theme().muted, CONTROLS_W - 44);
-    lv_label_set_long_mode(entity, LV_LABEL_LONG_DOT);
-    lv_obj_align(entity, LV_ALIGN_BOTTOM_LEFT, 0, 0);
 }
 
 lv_obj_t *create_info_card(lv_obj_t *page,
@@ -2677,7 +2686,7 @@ lv_obj_t *create_info_card(lv_obj_t *page,
 }
 
 void update_home_dashboard() {
-    if (g_dashboard != Dashboard::Settings) return;
+    if (!g_home_network || !g_home_ha || !g_home_calendar || !g_home_system) return;
 
     char buffer[420];
     if (network_service_connected()) {
@@ -2715,6 +2724,13 @@ void update_home_dashboard() {
              static_cast<unsigned long>(hours),
              static_cast<unsigned long>(minutes));
     set_label_text(g_home_system, buffer);
+
+    if (g_home_timeout_button_label) {
+        char timeout_button[64];
+        snprintf(timeout_button, sizeof(timeout_button), "Timeout: %s",
+                 screen_timeout_text(g_screen_timeout_seconds));
+        set_label_text(g_home_timeout_button_label, timeout_button);
+    }
 }
 
 const char *screen_timeout_text(uint32_t seconds) {
@@ -2894,6 +2910,7 @@ void create_home_dashboard() {
     char timeout_button[64];
     snprintf(timeout_button, sizeof(timeout_button), "Timeout: %s", screen_timeout_text(g_screen_timeout_seconds));
     lv_obj_t *timeout = button(system_card, timeout_button, 160, 38, false, &lv_font_montserrat_14);
+    g_home_timeout_button_label = timeout ? lv_obj_get_child(timeout, 0) : nullptr;
     lv_obj_align(timeout, LV_ALIGN_BOTTOM_LEFT, 0, 0);
     lv_obj_add_event_cb(timeout, screen_timeout_cycle_cb, LV_EVENT_CLICKED, nullptr);
 
@@ -2909,32 +2926,6 @@ void create_home_dashboard() {
     lv_obj_align(bright, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
     lv_obj_add_event_cb(bright, brightness_cb, LV_EVENT_CLICKED,
                         reinterpret_cast<void *>(static_cast<intptr_t>(10)));
-
-    update_home_dashboard();
-}
-
-void reset_dashboard_pointers(Dashboard dashboard) {
-    switch (dashboard) {
-        case Dashboard::Calendar:
-            g_status_label = nullptr;
-            g_summary_label = nullptr;
-            g_summary_title = nullptr;
-            g_week_label = nullptr;
-            memset(g_day_columns, 0, sizeof(g_day_columns));
-            memset(g_filter_buttons, 0, sizeof(g_filter_buttons));
-            break;
-        case Dashboard::Settings:
-            g_home_network = nullptr;
-            g_home_ha = nullptr;
-            g_home_calendar = nullptr;
-            g_home_system = nullptr;
-            break;
-        case Dashboard::Chores:
-        case Dashboard::Meals:
-        case Dashboard::Weather:
-        case Dashboard::Alarm:
-            break;
-    }
 }
 
 void reset_ui_pointers() {
@@ -2959,6 +2950,26 @@ void reset_ui_pointers() {
     g_home_ha = nullptr;
     g_home_calendar = nullptr;
     g_home_system = nullptr;
+    g_home_timeout_button_label = nullptr;
+
+    memset(g_calendar_days, 0, sizeof(g_calendar_days));
+    memset(g_chore_cards, 0, sizeof(g_chore_cards));
+    memset(g_chore_picker_cards, 0, sizeof(g_chore_picker_cards));
+    memset(g_meal_days, 0, sizeof(g_meal_days));
+    g_weather_widgets = {};
+    g_alarm_widgets = {};
+
+    g_chore_page = nullptr;
+    g_chore_main = nullptr;
+    g_chore_picker = nullptr;
+    g_chore_picker_status = nullptr;
+    g_chore_picker_back = nullptr;
+    g_chore_source = nullptr;
+    g_chore_progress_label = nullptr;
+    g_chore_progress = nullptr;
+    g_chore_empty = nullptr;
+    g_meals_page = nullptr;
+
     memset(g_day_columns, 0, sizeof(g_day_columns));
     memset(g_filter_buttons, 0, sizeof(g_filter_buttons));
 }
@@ -3019,18 +3030,43 @@ void update_shell_dashboard_state() {
     }
 }
 
+void update_dashboard_page(Dashboard dashboard) {
+    const size_t index = dashboard_index(dashboard);
+    if (index >= DASHBOARD_COUNT || !g_page_built[index]) return;
+
+    switch (dashboard) {
+        case Dashboard::Calendar:
+            render_week();
+            break;
+        case Dashboard::Chores:
+            update_chores_dashboard();
+            break;
+        case Dashboard::Meals:
+            update_meals_dashboard();
+            break;
+        case Dashboard::Weather:
+            update_weather_dashboard();
+            break;
+        case Dashboard::Alarm:
+            update_alarm_dashboard();
+            break;
+        case Dashboard::Settings:
+            update_home_dashboard();
+            break;
+    }
+
+    g_page_dirty[index] = false;
+}
+
 void build_dashboard_page(Dashboard dashboard) {
     const size_t index = dashboard_index(dashboard);
-    if (index >= DASHBOARD_COUNT || !g_page_roots[index]) return;
+    if (index >= DASHBOARD_COUNT || !g_page_roots[index] || g_page_built[index]) return;
 
     lv_obj_t *root = g_page_roots[index];
-    reset_dashboard_pointers(dashboard);
-    lv_obj_clean(root);
 
-    /* Existing dashboard builders use g_screen as their top-level parent.
-     * Point it at this dashboard's persistent root only while constructing the
-     * page, then immediately restore the real LVGL screen for overlays and
-     * global shell operations. */
+    /* Dashboard object trees are constructed exactly once per theme lifetime.
+     * Data refreshes update these objects in place; they never clean/recreate
+     * a page merely because its backing Home Assistant data changed. */
     lv_obj_t *saved_screen = g_screen;
     g_screen = root;
 
@@ -3057,10 +3093,11 @@ void build_dashboard_page(Dashboard dashboard) {
 
     g_screen = saved_screen;
     g_page_built[index] = true;
-    g_page_dirty[index] = false;
+    g_page_dirty[index] = true;
+    update_dashboard_page(dashboard);
 
     ESP_LOGI("FamilyCalendar",
-             "[UI v2] Built %s page; free heap=%u, free PSRAM=%u",
+             "[UI v2.1] Created persistent %s page; free heap=%u, free PSRAM=%u",
              dashboard_name(dashboard),
              static_cast<unsigned>(ESP.getFreeHeap()),
              static_cast<unsigned>(ESP.getFreePsram()));
@@ -3089,10 +3126,12 @@ void activate_dashboard(Dashboard dashboard) {
         g_dashboard_entered_ms = millis();
     }
 
-    /* Build while hidden so the previously visible page remains intact until
-     * the new page is ready.  Subsequent tab switches are hide/show only. */
-    if (!g_page_built[index] || g_page_dirty[index]) {
+    /* Build the object tree only once.  A dirty page means its model changed
+     * while hidden, so refresh its existing widgets before making it visible. */
+    if (!g_page_built[index]) {
         build_dashboard_page(dashboard);
+    } else if (g_page_dirty[index]) {
+        update_dashboard_page(dashboard);
     }
 
     show_only_dashboard(dashboard);
@@ -3227,7 +3266,11 @@ void rebuild_ui() {
     const size_t index = dashboard_index(g_dashboard);
     if (index >= DASHBOARD_COUNT || !g_page_roots[index]) return;
 
-    build_dashboard_page(g_dashboard);
+    if (!g_page_built[index]) {
+        build_dashboard_page(g_dashboard);
+    } else {
+        update_dashboard_page(g_dashboard);
+    }
     show_only_dashboard(g_dashboard);
     update_shell_dashboard_state();
     update_clock();
