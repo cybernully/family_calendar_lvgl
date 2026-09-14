@@ -1,7 +1,7 @@
 #pragma once
 
 #define APP_NAME "Family Hub"
-#define APP_VERSION "2.2.0"
+#define APP_VERSION "2.2.1"
 
 /* JC8012P4A1C native panel is portrait; 90 degrees gives 1280x800 landscape. */
 #define APP_DISPLAY_ROTATION 90
@@ -21,7 +21,7 @@
 #endif
 
 /*
- * v2.2.0 local web management / OTA defaults.  These can be overridden in
+ * v2.2.x local web management / OTA defaults.  These can be overridden in
  * app_local.h.  The web UI stores hostname/admin/UI-setting overrides in NVS,
  * so firmware updates do not erase them.
  */
@@ -220,9 +220,21 @@
  */
 #define HOSTED_C6_AUTO_UPDATE 1
 
-/* Weather service defaults. Local installation can override in app_local.h. */
+/*
+ * Weather source defaults.  v2.2.1 supports a hybrid Home Assistant snapshot:
+ * one weather entity supplies current conditions + daily forecast while a
+ * second entity supplies the hourly forecast.  Existing installations that
+ * only define HA_WEATHER_ENTITY remain compatible because both hybrid sources
+ * fall back to it until overridden from app_local.h or the web manager.
+ */
 #ifndef HA_WEATHER_ENTITY
 #define HA_WEATHER_ENTITY ""
+#endif
+#ifndef HA_WEATHER_CURRENT_DAILY_ENTITY
+#define HA_WEATHER_CURRENT_DAILY_ENTITY HA_WEATHER_ENTITY
+#endif
+#ifndef HA_WEATHER_HOURLY_ENTITY
+#define HA_WEATHER_HOURLY_ENTITY HA_WEATHER_ENTITY
 #endif
 #ifndef WEATHER_USE_IMPERIAL
 #define WEATHER_USE_IMPERIAL 1

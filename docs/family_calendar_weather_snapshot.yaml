@@ -1,0 +1,79 @@
+family_calendar_weather_snapshot:
+  alias: Family Calendar Weather Snapshot
+  description: Hybrid weather snapshot for Family Hub 2.2.1+
+  mode: single
+  fields:
+    current_daily_entity:
+      name: Current + daily weather entity
+      description: Weather entity used for current conditions and the daily forecast.
+      required: true
+      selector:
+        entity:
+          domain: weather
+    hourly_entity:
+      name: Hourly weather entity
+      description: Weather entity used for the hourly forecast.
+      required: true
+      selector:
+        entity:
+          domain: weather
+  sequence:
+    - variables:
+        current_source: "{{ current_daily_entity }}"
+        hourly_source: "{{ hourly_entity if hourly_entity | string | length > 0 else current_daily_entity }}"
+        daily_response: {}
+        hourly_response: {}
+
+    # WUnderground PWS exposes daily forecasts but not hourly forecasts.  Keep
+    # these calls independent so one provider can fail a forecast type without
+    # preventing the other source/current conditions from being returned.
+    - action: weather.get_forecasts
+      continue_on_error: true
+      target:
+        entity_id: "{{ current_source }}"
+      data:
+        type: daily
+      response_variable: daily_response
+
+    - action: weather.get_forecasts
+      continue_on_error: true
+      target:
+        entity_id: "{{ hourly_source }}"
+      data:
+        type: hourly
+      response_variable: hourly_response
+
+    - variables:
+        daily_forecast: >-
+          {{ daily_response.get(current_source, {}).get('forecast', [])
+             if daily_response is mapping else [] }}
+        hourly_forecast: >-
+          {{ hourly_response.get(hourly_source, {}).get('forecast', [])
+             if hourly_response is mapping else [] }}
+        result:
+          current_daily_entity: "{{ current_source }}"
+          hourly_entity: "{{ hourly_source }}"
+          current:
+            condition: "{{ states(current_source) }}"
+            last_updated: "{{ now().isoformat() }}"
+            temperature: "{{ state_attr(current_source, 'temperature') }}"
+            today_high: "{{ daily_forecast[0].get('temperature') if daily_forecast | count > 0 else none }}"
+            today_low: "{{ daily_forecast[0].get('templow') if daily_forecast | count > 0 else none }}"
+            apparent_temperature: "{{ state_attr(current_source, 'apparent_temperature') }}"
+            humidity: "{{ state_attr(current_source, 'humidity') }}"
+            pressure: "{{ state_attr(current_source, 'pressure') }}"
+            wind_speed: "{{ state_attr(current_source, 'wind_speed') }}"
+            wind_bearing: "{{ state_attr(current_source, 'wind_bearing') }}"
+            wind_gust_speed: "{{ state_attr(current_source, 'wind_gust_speed') }}"
+            precipitation: "{{ state_attr(current_source, 'precipitation') }}"
+            precipitation_probability: "{{ daily_forecast[0].get('precipitation_probability') if daily_forecast | count > 0 else none }}"
+          units:
+            temperature: "{{ state_attr(current_source, 'temperature_unit') or 'C' }}"
+            wind: "{{ state_attr(current_source, 'wind_speed_unit') or 'm/s' }}"
+            precipitation: "{{ state_attr(current_source, 'precipitation_unit') or 'mm' }}"
+            pressure: "{{ state_attr(current_source, 'pressure_unit') or 'hPa' }}"
+          daily: "{{ daily_forecast[:9] }}"
+          hourly: "{{ hourly_forecast[:18] }}"
+
+    - stop: Family Calendar hybrid weather snapshot complete
+      response_variable: result

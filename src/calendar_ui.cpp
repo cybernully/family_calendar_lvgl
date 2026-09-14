@@ -1981,7 +1981,7 @@ void update_weather_dashboard() {
     if (!weather.configured) {
         lv_obj_add_flag(g_weather_widgets.content, LV_OBJ_FLAG_HIDDEN);
         set_label_text(g_weather_widgets.message,
-                       "Weather is not configured. Configure the Home Assistant weather snapshot script and HA_WEATHER_ENTITY, then refresh.");
+                       "Weather is not configured. Install the 2.2.1 Home Assistant weather snapshot script and set the current/daily and hourly weather entities in Web Management.");
         lv_obj_remove_flag(g_weather_widgets.message, LV_OBJ_FLAG_HIDDEN);
         return;
     }
@@ -3098,7 +3098,7 @@ void build_dashboard_page(Dashboard dashboard) {
     update_dashboard_page(dashboard);
 
     ESP_LOGI("FamilyCalendar",
-             "[UI v2.2.0] Created persistent %s page; free heap=%u, free PSRAM=%u",
+             "[UI v2.2.1] Created persistent %s page; free heap=%u, free PSRAM=%u",
              dashboard_name(dashboard),
              static_cast<unsigned>(ESP.getFreeHeap()),
              static_cast<unsigned>(ESP.getFreePsram()));
@@ -3142,7 +3142,7 @@ void activate_dashboard(Dashboard dashboard) {
     if (changed) {
         g_dashboard_entered_ms = millis();
         ESP_LOGI("FamilyCalendar",
-                 "[UI v2.2.0] %s visible from cached state; HA refresh eligible after %lums",
+                 "[UI v2.2.1] %s visible from cached state; HA refresh eligible after %lums",
                  dashboard_name(dashboard),
                  static_cast<unsigned long>(HA_ACTIVE_TAB_SETTLE_MS));
     }
@@ -3177,7 +3177,7 @@ void rebuild_all_ui() {
     lv_obj_invalidate(g_screen);
     g_dashboard_entered_ms = millis();
     ESP_LOGI("FamilyCalendar",
-             "[UI v2.2.0] Persistent shell and all pages ready; free heap=%u, free PSRAM=%u",
+             "[UI v2.2.1] Persistent shell and all pages ready; free heap=%u, free PSRAM=%u",
              static_cast<unsigned>(ESP.getFreeHeap()),
              static_cast<unsigned>(ESP.getFreePsram()));
 }

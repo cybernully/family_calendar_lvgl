@@ -55,11 +55,20 @@
 // #define HA_ACTIVE_TAB_CHORES_REFRESH_MS 60000UL
 // #define HA_ACTIVE_TAB_ALARM_REFRESH_MS 15000UL
 
-/* Optional weather source entity from Home Assistant.
- * This should point to a weather.* entity that provides current state plus
- * forecast data via weather.get_forecasts.
+/*
+ * Weather source defaults.  v2.2.1 can combine two Home Assistant weather
+ * entities in one snapshot request:
+ *   - CURRENT_DAILY supplies the live PWS/current conditions and daily forecast
+ *   - HOURLY supplies the next-hour forecast series
+ *
+ * These are only defaults.  Both values can also be changed from the web
+ * manager and are then persisted in NVS across firmware updates.
  */
-#define HA_WEATHER_ENTITY "weather.forecast_home"
+#define HA_WEATHER_CURRENT_DAILY_ENTITY "weather.forecast_home"
+#define HA_WEATHER_HOURLY_ENTITY "weather.forecast_home"
+
+/* Legacy single-source alias retained for older local configurations. */
+// #define HA_WEATHER_ENTITY "weather.forecast_home"
 
 /* Optional units override: 1 = F/mph/in, 0 = C/mps/mm. */
 // #define WEATHER_USE_IMPERIAL 1

@@ -4,6 +4,7 @@
 #include "app_secrets.h"
 #include "network_service.h"
 #include "time_service.h"
+#include "web_manager.h"
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
@@ -40,6 +41,7 @@ size_t g_daily_count = 0;
 
 bool g_has_data = false;
 bool g_request_pending = false;
+bool g_force_request_pending = false;
 bool g_in_progress = false;
 bool g_publish_pending = false;
 
@@ -470,11 +472,29 @@ bool fetch_weather_snapshot(WeatherCurrent &current,
     static const char *kWeatherSnapshotPath =
         "/api/services/script/family_calendar_weather_snapshot?return_response";
 
+    char current_daily_entity[96] = {};
+    char hourly_entity[96] = {};
+    web_manager_get_weather_sources(current_daily_entity, sizeof(current_daily_entity),
+                                    hourly_entity, sizeof(hourly_entity));
+
+    JsonDocument request;
+    request["current_daily_entity"] = current_daily_entity;
+    request["hourly_entity"] = hourly_entity;
+    String body;
+    serializeJson(request, body);
+
+    ESP_LOGI("FamilyCalendar",
+             "[Weather] Hybrid snapshot sources: current/daily=%s hourly=%s",
+             current_daily_entity, hourly_entity);
+
     String payload;
-    const String body = "{}";
     const int code = http_post(kWeatherSnapshotPath, body, payload);
     if (code != 200) {
         ESP_LOGW("FamilyCalendar", "[Weather] Snapshot HTTP %d", code);
+        if (code == 400 || code == 422) {
+            ESP_LOGW("FamilyCalendar",
+                     "[Weather] Verify the v2.2.1 family_calendar_weather_snapshot script is installed with current_daily_entity and hourly_entity fields");
+        }
         return false;
     }
 
@@ -507,7 +527,7 @@ void weather_service_begin() {
         set_statusf("Weather not configured");
         return;
     }
-    set_statusf("Weather ready (HA snapshot)");
+    set_statusf("Weather ready (HA hybrid snapshot)");
 }
 
 void weather_service_set_worker_wake_callback(WeatherWorkerWakeCallback callback) {
@@ -515,9 +535,14 @@ void weather_service_set_worker_wake_callback(WeatherWorkerWakeCallback callback
 }
 
 bool weather_service_configured() {
+    char current_daily_entity[96] = {};
+    char hourly_entity[96] = {};
+    web_manager_get_weather_sources(current_daily_entity, sizeof(current_daily_entity),
+                                    hourly_entity, sizeof(hourly_entity));
     return usable_value(HA_BASE_URL, nullptr) &&
            usable_value(HA_ACCESS_TOKEN, "YOUR_HOME_ASSISTANT_LONG_LIVED_ACCESS_TOKEN") &&
-           usable_value(HA_WEATHER_ENTITY, "");
+           usable_value(current_daily_entity, "") &&
+           usable_value(hourly_entity, "");
 }
 
 bool weather_service_has_data() {
@@ -574,10 +599,18 @@ bool weather_service_request_refresh(bool force, const char *reason) {
 
     bool queued = false;
     portENTER_CRITICAL(&g_weather_mux);
-    if (!g_request_pending && !g_in_progress) {
-        g_request_pending = true;
+    if (!g_request_pending) {
+        if (!g_in_progress || force) {
+            g_request_pending = true;
+            g_force_request_pending = force;
+            queued = true;
+            snprintf(g_status, sizeof(g_status),
+                     g_in_progress ? "Weather follow-up refresh queued" : "Weather refresh queued");
+        }
+    } else if (force && !g_force_request_pending) {
+        /* Upgrade an already queued normal refresh to a forced refresh. */
+        g_force_request_pending = true;
         queued = true;
-        snprintf(g_status, sizeof(g_status), "Weather refresh queued");
     }
     portEXIT_CRITICAL(&g_weather_mux);
 
@@ -609,6 +642,7 @@ bool weather_service_worker_fetch() {
     if (!weather_service_configured()) {
         portENTER_CRITICAL(&g_weather_mux);
         g_request_pending = false;
+        g_force_request_pending = false;
         portEXIT_CRITICAL(&g_weather_mux);
         return false;
     }
@@ -616,9 +650,15 @@ bool weather_service_worker_fetch() {
     if (!network_service_connected()) return false;
 
     const uint32_t now_ms = millis();
-    if (!weather_service_should_refresh(now_ms)) {
+    bool forced = false;
+    portENTER_CRITICAL(&g_weather_mux);
+    forced = g_force_request_pending;
+    portEXIT_CRITICAL(&g_weather_mux);
+
+    if (!forced && !weather_service_should_refresh(now_ms)) {
         portENTER_CRITICAL(&g_weather_mux);
         g_request_pending = false;
+        g_force_request_pending = false;
         snprintf(g_status, sizeof(g_status), "Weather cache still fresh");
         portEXIT_CRITICAL(&g_weather_mux);
         ESP_LOGI("FamilyCalendar", "[Weather] Cache fresh; network request skipped");
@@ -629,10 +669,12 @@ bool weather_service_worker_fetch() {
     portENTER_CRITICAL(&g_weather_mux);
     if (g_request_pending && !g_in_progress) {
         should_fetch = true;
+        forced = g_force_request_pending;
         g_request_pending = false;
+        g_force_request_pending = false;
         g_in_progress = true;
         g_last_attempt_ms = now_ms;
-        snprintf(g_status, sizeof(g_status), "Weather fetch in progress");
+        snprintf(g_status, sizeof(g_status), forced ? "Forced weather fetch in progress" : "Weather fetch in progress");
     }
     portEXIT_CRITICAL(&g_weather_mux);
     if (!should_fetch) return false;
