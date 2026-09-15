@@ -10,6 +10,7 @@
 #include "network_service.h"
 #include "weather_service.h"
 #include "weather_icons.h"
+#include "runtime_config.h"
 #include "web_manager.h"
 #include "ui_fonts.h"
 #include "ui_symbols.h"
@@ -697,7 +698,7 @@ void show_event_details_overlay(const CalendarEvent &event) {
     }
 
     const char *calendar_name =
-        event.person < 4 ? CALENDAR_PEOPLE[event.person].name : "Calendar";
+        event.person < 4 ? runtime_config_person_name(event.person) : "Calendar";
 
     char body[1024];
     size_t used = 0;
@@ -1065,7 +1066,7 @@ void render_week() {
                 set_label_text(slot.time_label, time_text);
                 set_label_text(slot.title_label, event.title);
                 lv_obj_set_style_bg_color(slot.card,
-                                          lv_color_hex(CALENDAR_PEOPLE[event.person].color),
+                                          lv_color_hex(runtime_config_person_color(event.person)),
                                           LV_PART_MAIN);
                 lv_obj_remove_flag(slot.card, LV_OBJ_FLAG_HIDDEN);
             } else {
@@ -1121,7 +1122,7 @@ void filter_clicked_cb(lv_event_t *e) {
 
     lv_obj_t *btn = g_filter_buttons[index];
     if (btn) {
-        const uint32_t color = g_person_visible[index] ? CALENDAR_PEOPLE[index].color : theme().button;
+        const uint32_t color = g_person_visible[index] ? runtime_config_person_color(index) : theme().button;
         const uint32_t text_color = g_person_visible[index] ? 0xFFFFFF : theme().muted;
         lv_obj_set_style_bg_color(btn, lv_color_hex(color), LV_PART_MAIN);
         lv_obj_t *txt = lv_obj_get_child(btn, 0);
@@ -1260,10 +1261,10 @@ void create_calendar_dashboard() {
         lv_obj_t *chip = lv_button_create(toolbar);
         lv_obj_set_size(chip, 120, 40);
         lv_obj_set_pos(chip, x, 11);
-        style_box(chip, g_person_visible[i] ? CALENDAR_PEOPLE[i].color : theme().button, 18, 0);
+        style_box(chip, g_person_visible[i] ? runtime_config_person_color(i) : theme().button, 18, 0);
         lv_obj_t *txt = label(
             chip,
-            CALENDAR_PEOPLE[i].name,
+            runtime_config_person_name(i),
             &lv_font_montserrat_14,
             g_person_visible[i] ? 0xFFFFFF : theme().muted,
             106);

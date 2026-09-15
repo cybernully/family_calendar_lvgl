@@ -7,7 +7,6 @@
 #include "alarm_service.h"
 #include "time_service.h"
 #include "weather_service.h"
-#include "runtime_config.h"
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
@@ -62,11 +61,6 @@ volatile bool g_discovery_done = false;
 TaskHandle_t g_worker_task = nullptr;
 volatile bool g_boot_calendar_pending = true;
 uint32_t g_connected_since_ms = 0;
-volatile uint32_t g_last_ha_success_ms = 0;
-volatile bool g_connection_test_requested = false;
-volatile bool g_connection_test_in_progress = false;
-HomeAssistantConnectionTest g_connection_test = {};
-portMUX_TYPE g_connection_test_mux = portMUX_INITIALIZER_UNLOCKED;
 
 /* Calendar worker state. */
 volatile bool g_force_calendar_sync = true;
@@ -133,6 +127,12 @@ size_t g_alarm_action_tail = 0;
 size_t g_alarm_action_count = 0;
 portMUX_TYPE g_alarm_action_mux = portMUX_INITIALIZER_UNLOCKED;
 
+const char *CALENDAR_IDS[4] = {
+    HA_CALENDAR_1,
+    HA_CALENDAR_2,
+    HA_CALENDAR_3,
+    HA_CALENDAR_4,
+};
 
 CalendarEvent *sync_slot_events(int slot) {
     if (!g_sync_week_events || slot < 0 || slot >= PREFETCH_SLOT_COUNT) return nullptr;
@@ -221,12 +221,7 @@ int http_request(const char *method, const String &path, const String *body, Str
         WiFiClient client;
         code = execute(client);
     }
-    if (code >= 200 && code < 300) {
-        g_authenticated = true;
-        g_last_ha_success_ms = millis();
-    } else if (code == 401) {
-        g_authenticated = false;
-    }
+    if (code >= 200 && code < 300) g_authenticated = true;
     return code;
 }
 
@@ -305,7 +300,9 @@ bool parse_iso8601(const char *text, time_t &epoch, bool &all_day) {
 }
 
 size_t configured_calendar_count() {
-    return runtime_config_calendar_count();
+    size_t count = 0;
+    for (const char *id : CALENDAR_IDS) if (id && id[0]) ++count;
+    return count;
 }
 
 time_t week_start_for_offset(int offset) {
@@ -483,8 +480,7 @@ bool sync_calendar_window(int center_offset) {
      */
     JsonDocument request;
     JsonArray entities = request["entity_id"].to<JsonArray>();
-    for (size_t person = 0; person < 4; ++person) {
-        const char *entity_id = runtime_config_calendar_entity(person);
+    for (const char *entity_id : CALENDAR_IDS) {
         if (entity_id && entity_id[0]) entities.add(entity_id);
     }
     request["start_date_time"] = start_iso;
@@ -526,7 +522,7 @@ bool sync_calendar_window(int center_offset) {
     size_t successful = 0;
     size_t failed = 0;
     for (uint8_t person = 0; person < 4; ++person) {
-        const char *entity_id = runtime_config_calendar_entity(person);
+        const char *entity_id = CALENDAR_IDS[person];
         if (!entity_id || !entity_id[0]) continue;
 
         JsonVariant events_variant = response[entity_id]["events"];
@@ -1144,47 +1140,6 @@ void ha_worker(void *) {
 
         if (!network_service_connected()) continue;
 
-        /* Web diagnostics use the same shared HA worker; never open a second
-         * concurrent HTTP/TLS path. */
-        if (g_connection_test_requested && !g_connection_test_in_progress) {
-            portENTER_CRITICAL(&g_connection_test_mux);
-            g_connection_test_requested = false;
-            g_connection_test_in_progress = true;
-            g_connection_test.pending = false;
-            g_connection_test.in_progress = true;
-            portEXIT_CRITICAL(&g_connection_test_mux);
-
-            HomeAssistantConnectionTest result = {};
-            const uint32_t started = millis();
-            String payload;
-            result.http_code = http_get("/api/", payload);
-            result.latency_ms = millis() - started;
-            result.tested_ms = millis();
-            result.valid = true;
-            result.authenticated = result.http_code >= 200 && result.http_code < 300;
-            if (result.authenticated) {
-                snprintf(result.message, sizeof(result.message),
-                         "Home Assistant API reachable; token accepted");
-            } else if (result.http_code == 401) {
-                snprintf(result.message, sizeof(result.message),
-                         "Home Assistant rejected the access token (401)");
-            } else if (result.http_code < 0) {
-                snprintf(result.message, sizeof(result.message),
-                         "Transport/TLS error %d", result.http_code);
-            } else {
-                snprintf(result.message, sizeof(result.message),
-                         "Home Assistant returned HTTP %d", result.http_code);
-            }
-
-            portENTER_CRITICAL(&g_connection_test_mux);
-            g_connection_test = result;
-            g_connection_test_in_progress = false;
-            portEXIT_CRITICAL(&g_connection_test_mux);
-            ESP_LOGI("FamilyCalendar", "HA connection test: HTTP %d in %lums",
-                     result.http_code, static_cast<unsigned long>(result.latency_ms));
-            vTaskDelay(1);
-        }
-
         if (g_alarm_discovery_requested && !g_alarm_discovery_in_progress) {
             g_alarm_discovery_in_progress = true;
             discover_alarm_panels();
@@ -1504,8 +1459,7 @@ bool home_assistant_ready_for_auto_refresh() {
     if (now - g_connected_since_ms < HA_BOOT_NETWORK_STABLE_MS) return false;
     if (g_boot_calendar_pending || g_force_calendar_sync || g_force_chore_sync || g_force_alarm_sync) return false;
     if (g_todo_discovery_requested || g_todo_discovery_in_progress ||
-        g_alarm_discovery_requested || g_alarm_discovery_in_progress ||
-        g_connection_test_requested || g_connection_test_in_progress) return false;
+        g_alarm_discovery_requested || g_alarm_discovery_in_progress) return false;
     if (weather_service_worker_busy()) return false;
     if (g_chore_action_count > 0 || g_alarm_action_count > 0) return false;
     return !g_calendar_sync_in_progress && !g_chore_sync_in_progress && !g_alarm_sync_in_progress &&
@@ -1522,34 +1476,6 @@ uint32_t home_assistant_last_chore_request_ms() {
 
 uint32_t home_assistant_last_alarm_request_ms() {
     return g_last_alarm_attempt_ms;
-}
-
-uint32_t home_assistant_last_success_ms() {
-    return g_last_ha_success_ms;
-}
-
-bool home_assistant_request_connection_test() {
-    if (!home_assistant_configured() || !g_worker_task || !network_service_connected()) return false;
-    bool queued = false;
-    portENTER_CRITICAL(&g_connection_test_mux);
-    if (!g_connection_test_requested && !g_connection_test_in_progress) {
-        g_connection_test_requested = true;
-        g_connection_test.pending = true;
-        g_connection_test.in_progress = false;
-        queued = true;
-    }
-    portEXIT_CRITICAL(&g_connection_test_mux);
-    if (queued) xTaskNotifyGive(g_worker_task);
-    return queued;
-}
-
-void home_assistant_get_connection_test(HomeAssistantConnectionTest &out) {
-    memset(&out, 0, sizeof(out));
-    portENTER_CRITICAL(&g_connection_test_mux);
-    out = g_connection_test;
-    out.pending = g_connection_test_requested;
-    out.in_progress = g_connection_test_in_progress;
-    portEXIT_CRITICAL(&g_connection_test_mux);
 }
 
 void home_assistant_request_todo_discovery() {

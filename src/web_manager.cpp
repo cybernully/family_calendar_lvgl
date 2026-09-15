@@ -7,19 +7,25 @@
 #include "home_assistant.h"
 #include "network_service.h"
 #include "weather_service.h"
+#include "runtime_config.h"
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
+#include <SHA2Builder.h>
 #include <Update.h>
 #include <WebServer.h>
 #include <WiFi.h>
 #include <esp_ota_ops.h>
+#include <esp_partition.h>
+#include <esp_system.h>
+#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/portmacro.h>
 #include <string.h>
+#include <stdlib.h>
 
 namespace {
 
@@ -40,31 +46,59 @@ bool g_ota_succeeded = false;
 bool g_ota_dimmed = false;
 uint8_t g_ota_restore_backlight = APP_DEFAULT_BACKLIGHT;
 String g_ota_error;
+String g_ota_stream_sha256;
+String g_ota_readback_sha256;
+size_t g_ota_expected_size = 0;
+size_t g_ota_written = 0;
+uint8_t g_ota_last_logged_percent = 0;
+const esp_partition_t *g_ota_target_partition = nullptr;
+SHA256Builder g_ota_stream_hash;
 uint32_t g_reboot_at_ms = 0;
+String g_reset_reason = "unknown";
+uint32_t g_boot_count = 0;
+uint32_t g_brownout_count = 0;
+String g_last_ota_result = "none";
+String g_last_ota_from;
+String g_last_ota_to;
+String g_last_ota_sha256;
 
 static const char INDEX_HTML[] PROGMEM = R"HTML(
 <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Family Hub Management</title>
 <style>
-:root{color-scheme:light dark;font-family:system-ui,-apple-system,sans-serif}body{margin:0;background:#0f172a;color:#e5e7eb}.wrap{max-width:980px;margin:auto;padding:24px}.card{background:#172033;border:1px solid #334155;border-radius:14px;padding:18px;margin:0 0 16px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}.stat{background:#111827;border-radius:10px;padding:12px}.k{color:#94a3b8;font-size:.82rem}.v{font-size:1.05rem;font-weight:650;margin-top:3px}h1{margin:.2rem 0 1rem}h2{margin:.1rem 0 1rem;font-size:1.15rem}label{display:block;margin:.7rem 0 .3rem;color:#cbd5e1}input,select,button{box-sizing:border-box;font:inherit;border-radius:8px;border:1px solid #475569;padding:10px;background:#0f172a;color:#f8fafc}input,select{width:100%}button{cursor:pointer;background:#2563eb;border:0;padding:10px 16px;font-weight:650}button.secondary{background:#334155}button.danger{background:#b91c1c}.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.muted{color:#94a3b8;font-size:.9rem}.warn{color:#fbbf24}.ok{color:#4ade80}.bad{color:#f87171}progress{width:100%;height:18px}code{background:#111827;padding:2px 5px;border-radius:5px}@media(max-width:600px){.wrap{padding:12px}}
+:root{color-scheme:dark;font-family:system-ui,-apple-system,sans-serif}*{box-sizing:border-box}body{margin:0;background:#0f172a;color:#e5e7eb}.wrap{max-width:1100px;margin:auto;padding:24px}.card{background:#172033;border:1px solid #334155;border-radius:14px;padding:18px;margin:0 0 16px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}.stat{background:#111827;border-radius:10px;padding:12px}.k{color:#94a3b8;font-size:.82rem}.v{font-size:1.02rem;font-weight:650;margin-top:3px;word-break:break-word}h1{margin:.2rem 0 1rem}h2{margin:.1rem 0 1rem;font-size:1.15rem}h3{margin:.4rem 0 .8rem;font-size:1rem}label{display:block;margin:.7rem 0 .3rem;color:#cbd5e1}input,select,button{font:inherit;border-radius:8px;border:1px solid #475569;padding:10px;background:#0f172a;color:#f8fafc}input:not([type=color]),select{width:100%}input[type=color]{width:56px;height:42px;padding:3px}button{cursor:pointer;background:#2563eb;border:0;padding:10px 16px;font-weight:650}button.secondary{background:#334155}button.danger{background:#b91c1c}button:disabled{opacity:.55;cursor:not-allowed}.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.person{display:grid;grid-template-columns:1fr 70px 2fr;gap:10px;align-items:end;margin-bottom:8px}.muted{color:#94a3b8;font-size:.9rem}.warn{color:#fbbf24}.ok{color:#4ade80}.bad{color:#f87171}.result{white-space:pre-wrap;background:#111827;border-radius:8px;padding:10px;margin-top:10px;min-height:38px}progress{width:100%;height:18px}code{background:#111827;padding:2px 5px;border-radius:5px}@media(max-width:700px){.wrap{padding:12px}.person{grid-template-columns:1fr 64px}.person .cal{grid-column:1/-1}}
 </style></head><body><div class="wrap">
 <h1>Family Hub <span id="version" class="muted"></span></h1>
 <div class="card"><h2>Device status</h2><div class="grid" id="stats"></div><p id="defaultPw" class="warn" hidden>Default web password is still in use. Change it below.</p></div>
+
+<div class="card"><h2>Operations & diagnostics</h2><div class="row"><button onclick="testHA()">Test Home Assistant</button><button class="secondary" onclick="testWeather()">Test weather sources</button><button class="secondary" onclick="forceRefresh('calendar')">Refresh calendar</button><button class="secondary" onclick="forceRefresh('chores')">Refresh chores</button><button class="secondary" onclick="forceRefresh('weather')">Refresh weather</button><button class="secondary" onclick="window.open('/api/diagnostics','_blank')">Open diagnostics JSON</button></div><div id="diagMsg" class="result muted">No diagnostic test run yet.</div></div>
+
 <div class="card"><h2>Basic configuration</h2><form id="cfg">
-<div class="grid"><div><label>mDNS hostname</label><input id="hostname" name="hostname" maxlength="31"><div class="muted">Browse to <code>http://hostname.local</code> after reboot.</div></div><div><label>Admin username</label><input id="username" name="username" maxlength="31"></div><div><label>New admin password</label><input id="password" name="password" type="password" maxlength="63" placeholder="Leave blank to keep current"></div><div><label>Backlight</label><input id="backlight" name="backlight" type="number" min="10" max="100"></div><div><label>Theme</label><select id="dark" name="dark"><option value="0">Light</option><option value="1">Dark</option></select></div><div><label>Screen timeout (seconds)</label><select id="timeout" name="timeout"><option value="0">Off</option><option value="30">30</option><option value="60">60</option><option value="120">120</option><option value="300">300</option><option value="600">600</option></select></div><div><label>Chores todo entity</label><input id="chore_entity" name="chore_entity" maxlength="95" placeholder="todo.family_chores"></div><div><label>Alarmo entity</label><input id="alarm_entity" name="alarm_entity" maxlength="95" placeholder="alarm_control_panel.alarmo"></div><div><label>Weather current + daily entity</label><input id="weather_current_entity" name="weather_current_entity" maxlength="95" placeholder="weather.kwineena131"><div class="muted">Current conditions and daily forecast, e.g. WUnderground PWS.</div></div><div><label>Weather hourly entity</label><input id="weather_hourly_entity" name="weather_hourly_entity" maxlength="95" placeholder="weather.forecast_home"><div class="muted">Provider that supports <code>weather.get_forecasts</code> type <code>hourly</code>.</div></div></div>
-<p class="muted">Saved settings are stored in NVS and survive firmware updates. Weather-source changes apply immediately and queue a fresh snapshot; other UI settings take effect after reboot.</p><div class="row"><button type="submit">Save configuration</button><button type="button" class="secondary" onclick="refreshWeather()">Refresh weather now</button><button type="button" class="secondary" onclick="reboot()">Reboot device</button></div><p id="cfgMsg" class="muted"></p></form></div>
-<div class="card"><h2>OTA firmware update</h2><p class="muted">Upload the PlatformIO <code>firmware.bin</code>. The current UI stays responsive while Home Assistant work drains; flashing starts only when the HA worker is idle.</p><input id="fw" type="file" accept=".bin,application/octet-stream"><div style="height:10px"></div><button id="otaBtn" onclick="ota()">Upload firmware</button><div style="height:10px"></div><progress id="prog" max="100" value="0"></progress><p id="otaMsg" class="muted"></p></div>
+<div class="grid"><div><label>mDNS hostname</label><input id="hostname" maxlength="31"><div class="muted">Browse to <code>http://hostname.local</code> after reboot.</div></div><div><label>Admin username</label><input id="username" maxlength="31"></div><div><label>New admin password</label><input id="password" type="password" maxlength="63" placeholder="Leave blank to keep current"></div><div><label>Backlight</label><input id="backlight" type="number" min="10" max="100"></div><div><label>Theme</label><select id="dark"><option value="0">Light</option><option value="1">Dark</option></select></div><div><label>Screen timeout (seconds)</label><select id="timeout"><option value="0">Off</option><option value="30">30</option><option value="60">60</option><option value="120">120</option><option value="300">300</option><option value="600">600</option></select></div><div><label>Chores todo entity</label><input id="chore_entity" maxlength="95" placeholder="todo.family_chores"></div><div><label>Alarmo entity</label><input id="alarm_entity" maxlength="95" placeholder="alarm_control_panel.alarmo"></div><div><label>Weather current + daily entity</label><input id="weather_current_entity" maxlength="95" placeholder="weather.kwineena131"><div class="muted">Current conditions and daily forecast.</div></div><div><label>Weather hourly entity</label><input id="weather_hourly_entity" maxlength="95" placeholder="weather.forecast_home"><div class="muted">Provider supporting hourly forecasts.</div></div></div>
+<h3>Family calendars</h3>
+<div class="person"><div><label>Person 1 name</label><input id="p1_name" maxlength="47"></div><div><label>Color</label><input id="p1_color" type="color"></div><div class="cal"><label>Calendar entity</label><input id="p1_calendar" maxlength="95" placeholder="calendar.person_1"></div></div>
+<div class="person"><div><label>Person 2 name</label><input id="p2_name" maxlength="47"></div><div><label>Color</label><input id="p2_color" type="color"></div><div class="cal"><label>Calendar entity</label><input id="p2_calendar" maxlength="95"></div></div>
+<div class="person"><div><label>Person 3 name</label><input id="p3_name" maxlength="47"></div><div><label>Color</label><input id="p3_color" type="color"></div><div class="cal"><label>Calendar entity</label><input id="p3_calendar" maxlength="95"></div></div>
+<div class="person"><div><label>Person 4 name</label><input id="p4_name" maxlength="47"></div><div><label>Color</label><input id="p4_color" type="color"></div><div class="cal"><label>Calendar entity</label><input id="p4_calendar" maxlength="95"></div></div>
+<p class="muted">Family names, colors and calendar mappings are stored in NVS. Reboot after changing calendar mappings so the PSRAM week cache starts clean. Weather-source changes can refresh immediately.</p><div class="row"><button type="submit">Save configuration</button><button type="button" class="secondary" onclick="reboot()">Reboot device</button></div><p id="cfgMsg" class="muted"></p></form></div>
+
+<div class="card"><h2>OTA firmware update</h2><div id="otaInfo" class="muted"></div><p class="muted">Upload PlatformIO <code>firmware.bin</code>. v2.2.2 validates the image size, logs progress, calculates SHA-256 while receiving the file, verifies the written inactive partition, records the result in NVS, and only then reboots.</p><input id="fw" type="file" accept=".bin,application/octet-stream"><div style="height:10px"></div><button id="otaBtn" onclick="ota()">Upload firmware</button><div style="height:10px"></div><progress id="prog" max="100" value="0"></progress><p id="otaMsg" class="result muted">No OTA attempt this boot.</p></div>
 <div class="card"><div class="row"><button class="secondary" onclick="maintenance(false)">Cancel maintenance mode</button></div><p class="muted">Management uses HTTP Basic authentication on the local network. Do not expose port 80 to the Internet.</p></div>
 </div><script>
-const $=id=>document.getElementById(id); const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const $=id=>document.getElementById(id);const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function json(url,opt){const r=await fetch(url,opt);let j={};try{j=await r.json()}catch(e){}if(!r.ok)throw new Error(j.error||('HTTP '+r.status));return j}
 function esc(s){return String(s??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
-async function refresh(){try{const s=await json('/api/status');$('version').textContent='v'+s.version;$('defaultPw').hidden=!s.default_password;const pairs=[['IP',s.ip],['mDNS',s.mdns],['Wi-Fi RSSI',s.rssi+' dBm'],['Uptime',s.uptime],['Free heap',s.free_heap],['Free PSRAM',s.free_psram],['HA',s.ha_status],['Weather',s.weather_status],['OTA slot',s.ota_partition]];$('stats').innerHTML=pairs.map(p=>`<div class="stat"><div class="k">${esc(p[0])}</div><div class="v">${esc(p[1])}</div></div>`).join('')}catch(e){}}
-async function loadCfg(){const c=await json('/api/config');$('hostname').value=c.hostname;$('username').value=c.username;$('backlight').value=c.backlight;$('dark').value=c.dark?'1':'0';$('timeout').value=String(c.timeout);$('chore_entity').value=c.chore_entity||'';$('alarm_entity').value=c.alarm_entity||'';$('weather_current_entity').value=c.weather_current_entity||'';$('weather_hourly_entity').value=c.weather_hourly_entity||''}
-$('cfg').addEventListener('submit',async e=>{e.preventDefault();$('cfgMsg').textContent='Saving…';const p=new URLSearchParams();for(const id of ['hostname','username','password','backlight','dark','timeout','chore_entity','alarm_entity','weather_current_entity','weather_hourly_entity'])p.set(id,$(id).value);try{const r=await json('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:p});$('cfgMsg').textContent=r.weather_sources_changed?(r.weather_refresh_queued?'Saved. New weather sources are refreshing now. Reboot to apply UI/admin changes.':'Saved. Weather sources changed; use Refresh weather now after current work finishes. Reboot to apply UI/admin changes.'):'Saved. Reboot to apply UI/admin changes.';$('password').value=''}catch(e){$('cfgMsg').textContent=e.message}});
-async function refreshWeather(){try{const r=await json('/api/weather/refresh',{method:'POST'});$('cfgMsg').textContent=r.queued?'Weather refresh queued.':'Weather refresh is already pending/in progress.'}catch(e){$('cfgMsg').textContent=e.message}}
+function hexColor(v){let n=Number(v||0).toString(16).padStart(6,'0');return '#'+n.slice(-6)}
+function since(uptimeMs,stamp){if(!stamp)return 'never';const sec=Math.max(0,Math.floor((uptimeMs-stamp)/1000));if(sec<60)return sec+'s ago';if(sec<3600)return Math.floor(sec/60)+'m ago';return Math.floor(sec/3600)+'h ago'}
+async function refresh(){try{const s=await json('/api/status');$('version').textContent='v'+s.version;$('defaultPw').hidden=!s.default_password;const pairs=[['IP',s.ip],['mDNS',s.mdns],['Wi-Fi RSSI',s.rssi+' dBm'],['Uptime',s.uptime],['Free heap',s.free_heap],['Free PSRAM',s.free_psram],['HA',s.ha_status],['HA last success',since(s.uptime_ms,s.ha_last_success_ms)],['Weather',s.weather_status],['Weather last success',since(s.uptime_ms,s.weather_last_success_ms)],['Current/daily source',s.weather_current_entity||'not configured'],['Hourly source',s.weather_hourly_entity||'not configured'],['Reset',s.reset_reason],['Boot count',s.boot_count],['Brownouts',s.brownout_count],['OTA slot',s.ota_partition],['OTA target',s.ota_target||'n/a'],['Last OTA',s.last_ota_result||'none']];$('stats').innerHTML=pairs.map(p=>`<div class="stat"><div class="k">${esc(p[0])}</div><div class="v">${esc(p[1])}</div></div>`).join('');$('otaInfo').textContent=`Running ${s.ota_partition||'?'}; next target ${s.ota_target||'?'} (${s.ota_target_size||0} bytes). Last OTA: ${s.last_ota_result||'none'}`;}catch(e){}}
+async function loadCfg(){const c=await json('/api/config');for(const id of ['hostname','username','backlight','timeout','chore_entity','alarm_entity','weather_current_entity','weather_hourly_entity'])$(id).value=c[id]??'';$('dark').value=c.dark?'1':'0';for(let i=1;i<=4;i++){const p=c.people[i-1];$(`p${i}_name`).value=p.name||'';$(`p${i}_color`).value=hexColor(p.color);$(`p${i}_calendar`).value=p.calendar||''}}
+$('cfg').addEventListener('submit',async e=>{e.preventDefault();$('cfgMsg').textContent='Saving…';const p=new URLSearchParams();for(const id of ['hostname','username','password','backlight','dark','timeout','chore_entity','alarm_entity','weather_current_entity','weather_hourly_entity'])p.set(id,$(id).value);for(let i=1;i<=4;i++){p.set(`p${i}_name`,$(`p${i}_name`).value);p.set(`p${i}_color`,$(`p${i}_color`).value);p.set(`p${i}_calendar`,$(`p${i}_calendar`).value)}try{const r=await json('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:p});$('cfgMsg').textContent=r.weather_sources_changed?(r.weather_refresh_queued?'Saved. Weather is refreshing. Reboot recommended for family/calendar changes.':'Saved. Weather sources changed but a refresh is already busy. Reboot recommended.'):'Saved. Reboot recommended after family/calendar or UI changes.';$('password').value=''}catch(e){$('cfgMsg').textContent=e.message}});
+async function forceRefresh(domain){try{const r=await json('/api/refresh/'+domain,{method:'POST'});$('diagMsg').textContent=r.message||(`${domain} refresh queued.`)}catch(e){$('diagMsg').textContent=e.message}}
+async function testHA(){try{const r=await json('/api/ha/test',{method:'POST'});$('diagMsg').textContent=r.queued?'Home Assistant connection test queued on shared worker…':'A Home Assistant test is already pending.';await pollDiag('ha')}catch(e){$('diagMsg').textContent=e.message}}
+async function testWeather(){try{const r=await json('/api/weather/test',{method:'POST'});$('diagMsg').textContent=r.queued?'Weather-source test queued on shared worker…':'A weather test is already pending.';await pollDiag('weather')}catch(e){$('diagMsg').textContent=e.message}}
+async function pollDiag(kind){for(let i=0;i<80;i++){await sleep(250);const d=await json('/api/diagnostics');if(kind==='ha'){const t=d.home_assistant_test;if(t&&!t.pending&&!t.in_progress&&t.valid){$('diagMsg').textContent=`Home Assistant: HTTP ${t.http_code}, ${t.latency_ms} ms, authenticated=${t.authenticated}. ${t.message}`;return}}else{const t=d.weather_sources;if(t&&!t.pending&&!t.in_progress&&t.valid){$('diagMsg').textContent=`Weather current ${t.current_ok?'✓':'✗'} | daily ${t.daily_ok?'✓':'✗'} (${t.daily_count}) | hourly ${t.hourly_ok?'✓':'✗'} (${t.hourly_count})\n${t.current_daily_entity} + ${t.hourly_entity}\n${t.message||''}`;return}}} $('diagMsg').textContent+='\nTimed out waiting for test result.'}
 async function maintenance(on){try{return await json(on?'/api/maintenance/start':'/api/maintenance/cancel',{method:'POST'})}catch(e){$('otaMsg').textContent=e.message;throw e}}
-async function ota(){const f=$('fw').files[0];if(!f){$('otaMsg').textContent='Choose firmware.bin first.';return}if(!f.name.toLowerCase().endsWith('.bin')){$('otaMsg').textContent='Firmware file must end in .bin';return}$('otaBtn').disabled=true;$('otaMsg').textContent='Entering maintenance mode…';$('prog').value=0;try{await maintenance(true);let ready=false;for(let i=0;i<120;i++){const s=await json('/api/status');if(s.ota_ready){ready=true;break}$('otaMsg').textContent='Waiting for Home Assistant worker to become idle…';await sleep(250)}if(!ready)throw new Error('Timed out waiting for Home Assistant worker to become idle');$('otaMsg').textContent='Uploading firmware…';await new Promise((resolve,reject)=>{const x=new XMLHttpRequest();x.open('POST','/update');x.upload.onprogress=e=>{if(e.lengthComputable)$('prog').value=Math.round(e.loaded*100/e.total)};x.onload=()=>x.status>=200&&x.status<300?resolve():reject(new Error(x.responseText||('HTTP '+x.status)));x.onerror=()=>reject(new Error('Upload failed'));const d=new FormData();d.append('firmware',f,f.name);x.send(d)});$('prog').value=100;$('otaMsg').textContent='Update complete. Device is rebooting…'}catch(e){$('otaMsg').textContent=e.message;try{await maintenance(false)}catch(_){}$('otaBtn').disabled=false}}
+async function ota(){const f=$('fw').files[0];if(!f){$('otaMsg').textContent='Choose firmware.bin first.';return}if(!f.name.toLowerCase().endsWith('.bin')){$('otaMsg').textContent='Firmware file must end in .bin';return}$('otaBtn').disabled=true;$('prog').value=0;try{const pre=await json('/api/ota/preflight?size='+encodeURIComponent(f.size),{method:'POST'});$('otaMsg').textContent=`Preflight OK: ${f.size} bytes → ${pre.target_partition} (${pre.available_bytes} bytes). Entering maintenance…`;await maintenance(true);let ready=false;for(let i=0;i<120;i++){const s=await json('/api/status');if(s.ota_ready){ready=true;break}$('otaMsg').textContent='Waiting for Home Assistant worker to become idle…';await sleep(250)}if(!ready)throw new Error('Timed out waiting for Home Assistant worker to become idle');$('otaMsg').textContent='Uploading firmware…';const result=await new Promise((resolve,reject)=>{const x=new XMLHttpRequest();x.open('POST','/update');x.upload.onprogress=e=>{if(e.lengthComputable)$('prog').value=Math.round(e.loaded*100/e.total)};x.onload=()=>{let j={};try{j=JSON.parse(x.responseText)}catch(_){};x.status>=200&&x.status<300?resolve(j):reject(new Error(j.error||x.responseText||('HTTP '+x.status)))};x.onerror=()=>reject(new Error('Upload failed'));const d=new FormData();d.append('firmware',f,f.name);x.send(d)});$('prog').value=100;$('otaMsg').textContent=`Verified SHA-256 ${result.sha256||'complete'}. Device is rebooting…`;}catch(e){$('otaMsg').textContent=e.message;try{await maintenance(false)}catch(_){}$('otaBtn').disabled=false}}
 async function reboot(){if(!confirm('Reboot Family Hub now?'))return;try{await json('/api/reboot',{method:'POST'});alert('Rebooting…')}catch(e){alert(e.message)}}
 refresh();loadCfg().catch(()=>{});setInterval(refresh,5000);
 </script></body></html>
@@ -145,6 +179,134 @@ void send_error(int status, const char *message) {
     send_json(doc, status);
 }
 
+
+const char *reset_reason_text(esp_reset_reason_t reason) {
+    switch (reason) {
+        case ESP_RST_POWERON: return "power-on";
+        case ESP_RST_EXT: return "external reset";
+        case ESP_RST_SW: return "software reset";
+        case ESP_RST_PANIC: return "panic";
+        case ESP_RST_INT_WDT: return "interrupt watchdog";
+        case ESP_RST_TASK_WDT: return "task watchdog";
+        case ESP_RST_WDT: return "watchdog";
+        case ESP_RST_DEEPSLEEP: return "deep sleep";
+        case ESP_RST_BROWNOUT: return "brownout";
+        default: return "unknown";
+    }
+}
+
+uint32_t parse_hex_color(String value, uint32_t fallback) {
+    value.trim();
+    if (value.startsWith("#")) value.remove(0, 1);
+    if (value.length() != 6) return fallback;
+    char *end = nullptr;
+    const unsigned long parsed = strtoul(value.c_str(), &end, 16);
+    if (!end || *end != '\0' || parsed > 0xFFFFFFUL) return fallback;
+    return static_cast<uint32_t>(parsed);
+}
+
+void load_boot_and_ota_diagnostics() {
+    const esp_reset_reason_t reason = esp_reset_reason();
+    g_reset_reason = reset_reason_text(reason);
+
+    Preferences diag;
+    if (diag.begin("famcal_diag", false)) {
+        g_boot_count = diag.getUInt("boots", 0) + 1;
+        g_brownout_count = diag.getUInt("brownouts", 0);
+        if (reason == ESP_RST_BROWNOUT) ++g_brownout_count;
+        diag.putUInt("boots", g_boot_count);
+        diag.putUInt("brownouts", g_brownout_count);
+        diag.putString("last_reset", g_reset_reason);
+        diag.end();
+    }
+
+    Preferences ota;
+    if (!ota.begin("famcal_ota", false)) return;
+    const bool pending = ota.getBool("pending", false);
+    if (pending) {
+        const String from = ota.getString("pending_from", "unknown");
+        const String target = ota.getString("pending_target", "");
+        const String sha = ota.getString("pending_sha", "");
+        const esp_partition_t *running = esp_ota_get_running_partition();
+        const bool succeeded = running && target == running->label;
+        g_last_ota_result = succeeded ? "success" : "rollback / target not running";
+        g_last_ota_from = from;
+        g_last_ota_to = APP_VERSION;
+        g_last_ota_sha256 = sha;
+        ota.putString("last_result", g_last_ota_result);
+        ota.putString("last_from", g_last_ota_from);
+        ota.putString("last_to", g_last_ota_to);
+        ota.putString("last_sha", g_last_ota_sha256);
+        ota.putBool("pending", false);
+        ESP_LOGI("FamilyCalendar", "OTA boot verification: %s -> %s, target=%s running=%s, result=%s",
+                 from.c_str(), APP_VERSION, target.c_str(), running ? running->label : "unknown",
+                 g_last_ota_result.c_str());
+    } else {
+        g_last_ota_result = ota.getString("last_result", "none");
+        g_last_ota_from = ota.getString("last_from", "");
+        g_last_ota_to = ota.getString("last_to", "");
+        g_last_ota_sha256 = ota.getString("last_sha", "");
+    }
+    ota.end();
+}
+
+void record_ota_failure(const String &reason) {
+    g_last_ota_result = String("failed: ") + reason;
+    g_last_ota_from = APP_VERSION;
+    g_last_ota_to = "";
+    g_last_ota_sha256 = g_ota_stream_sha256;
+    Preferences ota;
+    if (ota.begin("famcal_ota", false)) {
+        ota.putBool("pending", false);
+        ota.putString("last_result", g_last_ota_result);
+        ota.putString("last_from", g_last_ota_from);
+        ota.putString("last_to", "");
+        ota.putString("last_sha", g_last_ota_sha256);
+        ota.end();
+    }
+}
+
+void record_ota_pending() {
+    Preferences ota;
+    if (!ota.begin("famcal_ota", false)) return;
+    ota.putBool("pending", true);
+    ota.putString("pending_from", APP_VERSION);
+    ota.putString("pending_target", g_ota_target_partition ? g_ota_target_partition->label : "");
+    ota.putString("pending_sha", g_ota_readback_sha256);
+    ota.putUInt("pending_size", static_cast<uint32_t>(g_ota_written));
+    ota.end();
+}
+
+bool hash_partition_sha256(const esp_partition_t *partition, size_t length, String &hash_out) {
+    hash_out = "";
+    if (!partition || length == 0 || length > partition->size) return false;
+    constexpr size_t CHUNK = 4096;
+    uint8_t *buffer = static_cast<uint8_t *>(
+        heap_caps_malloc(CHUNK, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (!buffer) buffer = static_cast<uint8_t *>(malloc(CHUNK));
+    if (!buffer) return false;
+
+    SHA256Builder hash;
+    hash.begin();
+    size_t offset = 0;
+    bool ok = true;
+    while (offset < length) {
+        const size_t amount = min(CHUNK, length - offset);
+        if (esp_partition_read(partition, offset, buffer, amount) != ESP_OK) {
+            ok = false;
+            break;
+        }
+        hash.add(buffer, amount);
+        offset += amount;
+        delay(0);
+    }
+    free(buffer);
+    if (!ok) return false;
+    hash.calculate();
+    hash_out = hash.toString();
+    return hash_out.length() == 64;
+}
+
 void copy_weather_sources(char *current_daily, size_t current_daily_len,
                           char *hourly, size_t hourly_len) {
     portENTER_CRITICAL(&g_config_mux);
@@ -193,19 +355,34 @@ void handle_status() {
     doc["ip"] = network_service_connected() ? WiFi.localIP().toString() : String("offline");
     doc["rssi"] = network_service_connected() ? WiFi.RSSI() : 0;
     doc["uptime"] = uptime_text();
+    doc["uptime_ms"] = millis();
     doc["free_heap"] = ESP.getFreeHeap();
     doc["free_psram"] = ESP.getFreePsram();
     doc["ha_status"] = home_assistant_status();
+    doc["ha_last_success_ms"] = home_assistant_last_success_ms();
     doc["weather_status"] = weather_service_status();
+    doc["weather_last_success_ms"] = weather_service_last_success_ms();
+    char weather_current[96] = {};
+    char weather_hourly[96] = {};
+    copy_weather_sources(weather_current, sizeof(weather_current), weather_hourly, sizeof(weather_hourly));
+    doc["weather_current_entity"] = weather_current;
+    doc["weather_hourly_entity"] = weather_hourly;
     doc["maintenance"] = g_maintenance;
     doc["ota_in_progress"] = g_ota_in_progress;
     doc["ota_ready"] = ota_ready();
     doc["mdns"] = String("http://") + g_hostname + ".local";
+    doc["reset_reason"] = g_reset_reason;
+    doc["boot_count"] = g_boot_count;
+    doc["brownout_count"] = g_brownout_count;
+    doc["last_ota_result"] = g_last_ota_result;
     doc["default_password"] = (strcmp(WEB_MANAGER_DEFAULT_PASSWORD, "familyhub") == 0 &&
                                g_admin_user == WEB_MANAGER_DEFAULT_USER &&
                                g_admin_password == WEB_MANAGER_DEFAULT_PASSWORD);
     const esp_partition_t *running = esp_ota_get_running_partition();
+    const esp_partition_t *target = esp_ota_get_next_update_partition(nullptr);
     doc["ota_partition"] = running ? running->label : "unknown";
+    doc["ota_target"] = target ? target->label : "unavailable";
+    doc["ota_target_size"] = target ? target->size : 0;
     send_json(doc);
 }
 
@@ -235,6 +412,13 @@ void handle_get_config() {
     copy_weather_sources(weather_current, sizeof(weather_current), weather_hourly, sizeof(weather_hourly));
     doc["weather_current_entity"] = weather_current;
     doc["weather_hourly_entity"] = weather_hourly;
+    JsonArray people = doc["people"].to<JsonArray>();
+    for (size_t i = 0; i < 4; ++i) {
+        JsonObject person = people.add<JsonObject>();
+        person["name"] = runtime_config_person_name(i);
+        person["color"] = runtime_config_person_color(i);
+        person["calendar"] = runtime_config_calendar_entity(i);
+    }
     send_json(doc);
 }
 
@@ -274,6 +458,34 @@ void handle_save_config() {
         return;
     }
 
+    String person_names[4];
+    String person_calendars[4];
+    uint32_t person_colors[4] = {};
+    bool calendar_config_changed = false;
+    for (size_t i = 0; i < 4; ++i) {
+        const String number = String(static_cast<unsigned>(i + 1));
+        person_names[i] = g_server.arg(String("p") + number + "_name").substring(0, 47);
+        person_names[i].trim();
+        person_calendars[i] = g_server.arg(String("p") + number + "_calendar").substring(0, 95);
+        person_calendars[i].trim();
+        if (!person_calendars[i].isEmpty() && !person_calendars[i].startsWith("calendar.")) {
+            send_error(400, (String("Person ") + number + " calendar entity must start with calendar.").c_str());
+            return;
+        }
+        person_colors[i] = parse_hex_color(g_server.arg(String("p") + number + "_color"),
+                                           runtime_config_person_color(i));
+        if (person_calendars[i] != runtime_config_calendar_entity(i)) calendar_config_changed = true;
+    }
+
+    /* Calendar entity buffers are shared read-only with the HA worker.  Only
+     * swap them while the single worker is idle, then reboot before the next
+     * calendar sync so the multi-week cache is rebuilt from the new mapping. */
+    if (calendar_config_changed && network_service_connected() && home_assistant_configured() &&
+        !home_assistant_ready_for_auto_refresh()) {
+        send_error(409, "Home Assistant is busy. Retry Save configuration after the current request finishes.");
+        return;
+    }
+
     Preferences web;
     if (!web.begin("famcal_web", false)) {
         send_error(500, "Could not open web configuration storage");
@@ -307,6 +519,13 @@ void handle_save_config() {
      * setters so web and touchscreen configuration stay in sync. */
     chore_service_set_entity(chore_entity.c_str());
     alarm_service_set_entity(alarm_entity.c_str());
+    for (size_t i = 0; i < 4; ++i) {
+        if (!runtime_config_set_person(i, person_names[i].c_str(), person_colors[i],
+                                       person_calendars[i].c_str())) {
+            send_error(500, "Could not save family/calendar configuration");
+            return;
+        }
+    }
 
     const bool weather_queued = weather_sources_changed && !g_maintenance
                                     ? weather_service_request_refresh(true, "web weather source changed")
@@ -317,6 +536,7 @@ void handle_save_config() {
     doc["reboot_required"] = true;
     doc["weather_sources_changed"] = weather_sources_changed;
     doc["weather_refresh_queued"] = weather_queued;
+    doc["calendar_config_changed"] = calendar_config_changed;
     send_json(doc);
 }
 
@@ -329,6 +549,161 @@ void handle_weather_refresh() {
     JsonDocument doc;
     doc["ok"] = true;
     doc["queued"] = weather_service_request_refresh(true, "web manual refresh");
+    send_json(doc);
+}
+
+void handle_weather_test() {
+    if (!ensure_auth()) return;
+    if (g_maintenance) {
+        send_error(409, "Weather testing is unavailable during OTA maintenance");
+        return;
+    }
+    JsonDocument doc;
+    doc["ok"] = true;
+    doc["queued"] = weather_service_request_source_test();
+    send_json(doc);
+}
+
+void handle_ha_test() {
+    if (!ensure_auth()) return;
+    if (g_maintenance) {
+        send_error(409, "Home Assistant testing is unavailable during OTA maintenance");
+        return;
+    }
+    JsonDocument doc;
+    doc["ok"] = true;
+    doc["queued"] = home_assistant_request_connection_test();
+    send_json(doc);
+}
+
+void handle_refresh_calendar() {
+    if (!ensure_auth()) return;
+    if (g_maintenance) { send_error(409, "Refresh unavailable during OTA maintenance"); return; }
+    home_assistant_request_sync();
+    JsonDocument doc; doc["ok"] = true; doc["message"] = "Calendar refresh queued on shared HA worker"; send_json(doc);
+}
+
+void handle_refresh_chores() {
+    if (!ensure_auth()) return;
+    if (g_maintenance) { send_error(409, "Refresh unavailable during OTA maintenance"); return; }
+    if (!chore_service_configured()) { send_error(400, "Chores todo entity is not configured"); return; }
+    home_assistant_request_chore_sync();
+    JsonDocument doc; doc["ok"] = true; doc["message"] = "Chores refresh queued on shared HA worker"; send_json(doc);
+}
+
+void handle_diagnostics() {
+    if (!ensure_auth()) return;
+    JsonDocument doc;
+    doc["app"] = APP_NAME;
+    doc["version"] = APP_VERSION;
+    doc["uptime_ms"] = millis();
+    doc["ip"] = network_service_connected() ? WiFi.localIP().toString() : String("offline");
+    doc["rssi_dbm"] = network_service_connected() ? WiFi.RSSI() : 0;
+    doc["free_heap"] = ESP.getFreeHeap();
+    doc["free_psram"] = ESP.getFreePsram();
+    doc["reset_reason"] = g_reset_reason;
+    doc["boot_count"] = g_boot_count;
+    doc["brownout_count"] = g_brownout_count;
+
+    JsonObject configured = doc["configured"].to<JsonObject>();
+    configured["home_assistant"] = home_assistant_configured();
+    configured["calendars"] = runtime_config_calendar_count() > 0;
+    configured["calendar_count"] = runtime_config_calendar_count();
+    configured["chores"] = chore_service_configured();
+    configured["alarm"] = alarm_service_configured();
+    configured["weather"] = weather_service_configured();
+
+    doc["ha_status"] = home_assistant_status();
+    doc["ha_authenticated"] = home_assistant_authenticated();
+    doc["ha_last_success_ms"] = home_assistant_last_success_ms();
+    doc["weather_status"] = weather_service_status();
+    doc["weather_last_success_ms"] = weather_service_last_success_ms();
+
+    HomeAssistantConnectionTest ha_test = {};
+    home_assistant_get_connection_test(ha_test);
+    JsonObject ha = doc["home_assistant_test"].to<JsonObject>();
+    ha["valid"] = ha_test.valid;
+    ha["pending"] = ha_test.pending;
+    ha["in_progress"] = ha_test.in_progress;
+    ha["authenticated"] = ha_test.authenticated;
+    ha["http_code"] = ha_test.http_code;
+    ha["latency_ms"] = ha_test.latency_ms;
+    ha["tested_ms"] = ha_test.tested_ms;
+    ha["message"] = ha_test.message;
+
+    WeatherSourceDiagnostics wx = {};
+    weather_service_get_source_diagnostics(wx);
+    JsonObject weather = doc["weather_sources"].to<JsonObject>();
+    weather["valid"] = wx.valid;
+    weather["pending"] = wx.pending;
+    weather["in_progress"] = wx.in_progress;
+    weather["current_ok"] = wx.current_ok;
+    weather["daily_ok"] = wx.daily_ok;
+    weather["hourly_ok"] = wx.hourly_ok;
+    weather["daily_count"] = wx.daily_count;
+    weather["hourly_count"] = wx.hourly_count;
+    weather["latency_ms"] = wx.latency_ms;
+    weather["tested_ms"] = wx.tested_ms;
+    weather["current_daily_entity"] = wx.current_daily_entity;
+    weather["hourly_entity"] = wx.hourly_entity;
+    weather["message"] = wx.message;
+
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    const esp_partition_t *target = esp_ota_get_next_update_partition(nullptr);
+    JsonObject ota = doc["ota"].to<JsonObject>();
+    ota["running_partition"] = running ? running->label : "unknown";
+    ota["target_partition"] = target ? target->label : "unavailable";
+    ota["target_size"] = target ? target->size : 0;
+    ota["maintenance"] = g_maintenance;
+    ota["in_progress"] = g_ota_in_progress;
+    ota["expected_size"] = g_ota_expected_size;
+    ota["bytes_written"] = g_ota_written;
+    ota["stream_sha256"] = g_ota_stream_sha256;
+    ota["readback_sha256"] = g_ota_readback_sha256;
+    ota["last_result"] = g_last_ota_result;
+    ota["last_from"] = g_last_ota_from;
+    ota["last_to"] = g_last_ota_to;
+    ota["last_sha256"] = g_last_ota_sha256;
+    ota["last_error"] = g_ota_error;
+
+    send_json(doc);
+}
+
+void handle_ota_preflight() {
+    if (!ensure_auth()) return;
+    if (g_ota_in_progress) { send_error(409, "OTA upload is already in progress"); return; }
+    const size_t image_size = static_cast<size_t>(strtoull(g_server.arg("size").c_str(), nullptr, 10));
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    const esp_partition_t *target = esp_ota_get_next_update_partition(nullptr);
+    if (!target || target == running) {
+        send_error(500, "No inactive OTA partition is available");
+        return;
+    }
+    if (image_size == 0) { send_error(400, "Firmware image size is missing or zero"); return; }
+    if (image_size > target->size) {
+        send_error(413, (String("Firmware is too large for ") + target->label + ": " +
+                         String(static_cast<unsigned long>(image_size)) + " > " +
+                         String(static_cast<unsigned long>(target->size)) + " bytes").c_str());
+        return;
+    }
+
+    g_ota_target_partition = target;
+    g_ota_expected_size = image_size;
+    g_ota_written = 0;
+    g_ota_stream_sha256 = "";
+    g_ota_readback_sha256 = "";
+    g_ota_error = "";
+    g_ota_last_logged_percent = 0;
+
+    ESP_LOGI("FamilyCalendar", "OTA preflight: running=%s target=%s image=%u bytes available=%u bytes",
+             running ? running->label : "unknown", target->label,
+             static_cast<unsigned>(image_size), static_cast<unsigned>(target->size));
+    JsonDocument doc;
+    doc["ok"] = true;
+    doc["running_partition"] = running ? running->label : "unknown";
+    doc["target_partition"] = target->label;
+    doc["image_size"] = image_size;
+    doc["available_bytes"] = target->size;
     send_json(doc);
 }
 
@@ -366,6 +741,10 @@ void handle_update_upload() {
         g_ota_error = "";
         g_ota_succeeded = false;
         g_ota_accepting = false;
+        g_ota_written = 0;
+        g_ota_stream_sha256 = "";
+        g_ota_readback_sha256 = "";
+        g_ota_last_logged_percent = 0;
 
         if (!g_server.authenticate(g_admin_user.c_str(), g_admin_password.c_str())) {
             g_ota_error = "Authentication required";
@@ -379,11 +758,28 @@ void handle_update_upload() {
             g_ota_error = "Firmware file must end in .bin";
             return;
         }
-        if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)) {
-            g_ota_error = String("Update.begin failed, error ") + Update.getError();
+        if (!g_ota_target_partition || g_ota_expected_size == 0) {
+            g_ota_error = "OTA preflight was not completed";
+            return;
+        }
+        const esp_partition_t *next = esp_ota_get_next_update_partition(nullptr);
+        if (!next || next != g_ota_target_partition) {
+            g_ota_error = "OTA target partition changed after preflight";
+            return;
+        }
+        if (g_ota_expected_size > g_ota_target_partition->size) {
+            g_ota_error = "Firmware exceeds inactive OTA partition size";
+            return;
+        }
+        if (!Update.begin(g_ota_expected_size, U_FLASH)) {
+            g_ota_error = String("Update.begin failed: ") + Update.errorString() +
+                          " (code " + String(static_cast<unsigned>(Update.getError())) + ")";
+            ESP_LOGE("FamilyCalendar", "%s", g_ota_error.c_str());
+            record_ota_failure(g_ota_error);
             return;
         }
 
+        g_ota_stream_hash.begin();
         g_ota_in_progress = true;
         g_ota_accepting = true;
         if (board_display_awake()) {
@@ -392,7 +788,10 @@ void handle_update_upload() {
             board_set_backlight(ota_backlight);
             g_ota_dimmed = true;
         }
-        ESP_LOGI("FamilyCalendar", "OTA upload started: %s", upload.filename.c_str());
+        ESP_LOGI("FamilyCalendar", "OTA upload started: %s, %u bytes -> %s (%u bytes)",
+                 upload.filename.c_str(), static_cast<unsigned>(g_ota_expected_size),
+                 g_ota_target_partition->label,
+                 static_cast<unsigned>(g_ota_target_partition->size));
         return;
     }
 
@@ -401,32 +800,90 @@ void handle_update_upload() {
     if (upload.status == UPLOAD_FILE_WRITE) {
         const size_t written = Update.write(upload.buf, upload.currentSize);
         if (written != upload.currentSize) {
-            g_ota_error = String("OTA write failed, error ") + Update.getError();
+            g_ota_error = String("OTA write failed after ") + String(static_cast<unsigned long>(g_ota_written)) + " bytes: " +
+                          Update.errorString() + " (code " + String(static_cast<unsigned>(Update.getError())) + ")";
+            ESP_LOGE("FamilyCalendar", "%s", g_ota_error.c_str());
             g_ota_accepting = false;
             Update.abort();
             g_ota_in_progress = false;
+            record_ota_failure(g_ota_error);
             restore_backlight_after_failed_ota();
+            return;
+        }
+
+        g_ota_stream_hash.add(upload.buf, written);
+        g_ota_written += written;
+        const uint8_t percent = g_ota_expected_size
+                                    ? static_cast<uint8_t>((g_ota_written * 100ULL) / g_ota_expected_size)
+                                    : 0;
+        if (percent >= g_ota_last_logged_percent + 10 || percent == 100) {
+            g_ota_last_logged_percent = percent;
+            ESP_LOGI("FamilyCalendar", "OTA write progress: %u%% (%u/%u bytes)",
+                     percent, static_cast<unsigned>(g_ota_written),
+                     static_cast<unsigned>(g_ota_expected_size));
         }
     } else if (upload.status == UPLOAD_FILE_END) {
-        if (Update.end(true)) {
-            g_ota_succeeded = true;
-            g_reboot_at_ms = millis() + 3000;  // fail-safe if the final HTTP response is interrupted
-            /* Keep g_ota_in_progress asserted until reboot so the main loop
-             * cannot restart Home Assistant network work after the image has
-             * been committed but before the reboot response is delivered. */
-            ESP_LOGI("FamilyCalendar", "OTA image accepted: %u bytes", static_cast<unsigned>(upload.totalSize));
-        } else {
-            g_ota_error = String("OTA finalize failed, error ") + Update.getError();
+        g_ota_stream_hash.calculate();
+        g_ota_stream_sha256 = g_ota_stream_hash.toString();
+
+        if (g_ota_written != g_ota_expected_size) {
+            g_ota_error = String("OTA size mismatch: received ") + String(static_cast<unsigned long>(g_ota_written)) +
+                          " of " + String(static_cast<unsigned long>(g_ota_expected_size)) + " bytes";
+            Update.abort();
             g_ota_in_progress = false;
+            g_ota_accepting = false;
+            record_ota_failure(g_ota_error);
             restore_backlight_after_failed_ota();
+            ESP_LOGE("FamilyCalendar", "%s", g_ota_error.c_str());
+            return;
         }
+
+        if (!Update.end(false)) {
+            g_ota_error = String("OTA finalize failed: ") + Update.errorString() +
+                          " (code " + String(static_cast<unsigned>(Update.getError())) + ")";
+            g_ota_in_progress = false;
+            g_ota_accepting = false;
+            record_ota_failure(g_ota_error);
+            restore_backlight_after_failed_ota();
+            ESP_LOGE("FamilyCalendar", "%s", g_ota_error.c_str());
+            return;
+        }
+
+        ESP_LOGI("FamilyCalendar", "OTA stream SHA-256: %s", g_ota_stream_sha256.c_str());
+        if (!hash_partition_sha256(g_ota_target_partition, g_ota_expected_size, g_ota_readback_sha256)) {
+            g_ota_error = "Could not SHA-256 verify the written OTA partition";
+        } else if (!g_ota_readback_sha256.equalsIgnoreCase(g_ota_stream_sha256)) {
+            g_ota_error = String("OTA SHA-256 mismatch: stream=") + g_ota_stream_sha256 +
+                          " flash=" + g_ota_readback_sha256;
+        }
+
+        if (!g_ota_error.isEmpty()) {
+            const esp_partition_t *running = esp_ota_get_running_partition();
+            if (running) esp_ota_set_boot_partition(running);
+            g_ota_in_progress = false;
+            g_ota_accepting = false;
+            record_ota_failure(g_ota_error);
+            restore_backlight_after_failed_ota();
+            ESP_LOGE("FamilyCalendar", "%s", g_ota_error.c_str());
+            return;
+        }
+
+        ESP_LOGI("FamilyCalendar", "OTA readback SHA-256 verified: %s", g_ota_readback_sha256.c_str());
+        g_ota_succeeded = true;
         g_ota_accepting = false;
+        record_ota_pending();
+        g_reboot_at_ms = millis() + 3000;  // fail-safe if final HTTP response is interrupted
+        /* Keep g_ota_in_progress asserted until reboot so no HA traffic resumes. */
+        ESP_LOGI("FamilyCalendar", "OTA image accepted: %u bytes, target=%s",
+                 static_cast<unsigned>(g_ota_written), g_ota_target_partition->label);
     } else if (upload.status == UPLOAD_FILE_ABORTED) {
         Update.abort();
-        g_ota_error = "OTA upload aborted";
+        g_ota_error = String("OTA upload aborted after ") + String(static_cast<unsigned long>(g_ota_written)) + " bytes";
         g_ota_accepting = false;
         g_ota_in_progress = false;
+        record_ota_failure(g_ota_error);
         restore_backlight_after_failed_ota();
+        ESP_LOGE("FamilyCalendar", "%s", g_ota_error.c_str());
     }
 }
 
@@ -442,6 +899,9 @@ void handle_update_complete() {
     JsonDocument doc;
     doc["ok"] = true;
     doc["rebooting"] = true;
+    doc["bytes"] = g_ota_written;
+    doc["sha256"] = g_ota_readback_sha256;
+    doc["target_partition"] = g_ota_target_partition ? g_ota_target_partition->label : "unknown";
     send_json(doc);
     g_reboot_at_ms = millis() + 1200;
 }
@@ -467,6 +927,13 @@ void register_routes() {
     g_server.on("/api/config", HTTP_GET, handle_get_config);
     g_server.on("/api/config", HTTP_POST, handle_save_config);
     g_server.on("/api/weather/refresh", HTTP_POST, handle_weather_refresh);
+    g_server.on("/api/weather/test", HTTP_POST, handle_weather_test);
+    g_server.on("/api/ha/test", HTTP_POST, handle_ha_test);
+    g_server.on("/api/refresh/calendar", HTTP_POST, handle_refresh_calendar);
+    g_server.on("/api/refresh/chores", HTTP_POST, handle_refresh_chores);
+    g_server.on("/api/refresh/weather", HTTP_POST, handle_weather_refresh);
+    g_server.on("/api/diagnostics", HTTP_GET, handle_diagnostics);
+    g_server.on("/api/ota/preflight", HTTP_POST, handle_ota_preflight);
     g_server.on("/api/maintenance/start", HTTP_POST, handle_maintenance_start);
     g_server.on("/api/maintenance/cancel", HTTP_POST, handle_maintenance_cancel);
     g_server.on("/api/reboot", HTTP_POST, handle_reboot);
@@ -480,6 +947,7 @@ void register_routes() {
 } // namespace
 
 void web_manager_begin() {
+    load_boot_and_ota_diagnostics();
     load_web_preferences();
     register_routes();
     g_server.begin();

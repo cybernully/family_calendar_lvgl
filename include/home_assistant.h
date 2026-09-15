@@ -11,6 +11,17 @@ constexpr uint32_t HA_CHANGE_ALARM = 1U << 3;
 constexpr uint32_t HA_CHANGE_ALARM_PANELS = 1U << 4;
 constexpr uint32_t HA_CHANGE_WEATHER = 1U << 5;
 
+struct HomeAssistantConnectionTest {
+    bool valid;
+    bool pending;
+    bool in_progress;
+    bool authenticated;
+    int http_code;
+    uint32_t latency_ms;
+    uint32_t tested_ms;
+    char message[96];
+};
+
 void home_assistant_begin();
 void home_assistant_loop(int week_offset);
 void home_assistant_request_sync();
@@ -29,6 +40,11 @@ bool home_assistant_ready_for_auto_refresh();
 uint32_t home_assistant_last_calendar_request_ms();
 uint32_t home_assistant_last_chore_request_ms();
 uint32_t home_assistant_last_alarm_request_ms();
+uint32_t home_assistant_last_success_ms();
+
+/* Connection diagnostics execute on the existing shared HA worker. */
+bool home_assistant_request_connection_test();
+void home_assistant_get_connection_test(HomeAssistantConnectionTest &out);
 
 /* Home Assistant To-do list / chore support. */
 void home_assistant_request_todo_discovery();

@@ -6,6 +6,12 @@
 #define PERSON_3_NAME "Family"
 #define PERSON_4_NAME "Other"
 
+/* Optional compile-time color defaults; Web Management can override these. */
+#define PERSON_1_COLOR 0x22C55EUL
+#define PERSON_2_COLOR 0x2596BEUL
+#define PERSON_3_COLOR 0xF06292UL
+#define PERSON_4_COLOR 0xBA68C8UL
+
 #define HA_CALENDAR_1 "calendar.person_1"
 #define HA_CALENDAR_2 "calendar.person_2"
 #define HA_CALENDAR_3 "calendar.family"

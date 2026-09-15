@@ -44,6 +44,9 @@ bool g_request_pending = false;
 bool g_force_request_pending = false;
 bool g_in_progress = false;
 bool g_publish_pending = false;
+bool g_source_test_pending = false;
+bool g_source_test_in_progress = false;
+WeatherSourceDiagnostics g_source_diagnostics = {};
 
 uint32_t g_last_attempt_ms = 0;
 uint32_t g_last_success_ms = 0;
@@ -211,6 +214,31 @@ float pressure_to_hpa(float value, const char *unit) {
     return value;
 }
 
+float wind_bearing_to_degrees(JsonVariantConst value) {
+    if (value.isNull()) return NAN;
+    if (value.is<float>() || value.is<double>() || value.is<int>() || value.is<long>()) {
+        return value.as<float>();
+    }
+
+    const char *text = value.as<const char *>();
+    if (!text || !text[0]) return NAN;
+    char *end = nullptr;
+    const float numeric = strtof(text, &end);
+    if (end && end != text && *end == '\0') return numeric;
+
+    struct Cardinal { const char *name; float degrees; };
+    static const Cardinal directions[] = {
+        {"N", 0.0f}, {"NNE", 22.5f}, {"NE", 45.0f}, {"ENE", 67.5f},
+        {"E", 90.0f}, {"ESE", 112.5f}, {"SE", 135.0f}, {"SSE", 157.5f},
+        {"S", 180.0f}, {"SSW", 202.5f}, {"SW", 225.0f}, {"WSW", 247.5f},
+        {"W", 270.0f}, {"WNW", 292.5f}, {"NW", 315.0f}, {"NNW", 337.5f},
+    };
+    for (const Cardinal &direction : directions) {
+        if (strcasecmp(text, direction.name) == 0) return direction.degrees;
+    }
+    return NAN;
+}
+
 int http_request(const char *method, const String &path, const String *body, String &payload) {
     payload = "";
     const String url = clean_base_url() + path;
@@ -269,6 +297,17 @@ JsonObjectConst weather_snapshot_object(const JsonDocument &doc) {
     return doc.as<JsonObjectConst>();
 }
 
+bool json_bool(JsonVariantConst value, bool fallback = false) {
+    if (value.isNull()) return fallback;
+    if (value.is<bool>()) return value.as<bool>();
+    if (value.is<int>() || value.is<long>()) return value.as<long>() != 0;
+    const char *text = value.as<const char *>();
+    if (!text) return fallback;
+    if (strcasecmp(text, "true") == 0 || strcmp(text, "1") == 0 || strcasecmp(text, "yes") == 0) return true;
+    if (strcasecmp(text, "false") == 0 || strcmp(text, "0") == 0 || strcasecmp(text, "no") == 0) return false;
+    return fallback;
+}
+
 bool parse_weather_snapshot(const String &payload,
                             WeatherCurrent &current,
                             WeatherUnits &units,
@@ -276,7 +315,8 @@ bool parse_weather_snapshot(const String &payload,
                             size_t &hourly_count,
                             WeatherDayForecast *daily,
                             size_t &daily_count,
-                            time_t &updated_epoch) {
+                            time_t &updated_epoch,
+                            WeatherSourceDiagnostics *source_diag) {
     JsonDocument doc;
     const DeserializationError error = deserializeJson(doc, payload);
     if (error || !doc.is<JsonObject>()) {
@@ -299,6 +339,23 @@ bool parse_weather_snapshot(const String &payload,
     if (current_json.isNull() || units_json.isNull() || daily_json.isNull() || hourly_json.isNull()) {
         ESP_LOGW("FamilyCalendar", "[Weather] Snapshot missing current/units/daily/hourly data");
         return false;
+    }
+
+    if (source_diag) {
+        memset(source_diag, 0, sizeof(*source_diag));
+        const JsonObjectConst sources = snapshot["sources"].as<JsonObjectConst>();
+        if (!sources.isNull()) {
+            source_diag->valid = true;
+            source_diag->current_ok = json_bool(sources["current_ok"]);
+            source_diag->daily_ok = json_bool(sources["daily_ok"]);
+            source_diag->hourly_ok = json_bool(sources["hourly_ok"]);
+            snprintf(source_diag->current_daily_entity, sizeof(source_diag->current_daily_entity), "%s",
+                     sources["current_daily_entity"] | "");
+            snprintf(source_diag->hourly_entity, sizeof(source_diag->hourly_entity), "%s",
+                     sources["hourly_entity"] | "");
+            snprintf(source_diag->message, sizeof(source_diag->message), "%s",
+                     sources["message"] | "");
+        }
     }
 
     memset(&current, 0, sizeof(current));
@@ -345,7 +402,7 @@ bool parse_weather_snapshot(const String &payload,
         current.wind_mps = wind_to_mps(current_json["wind_speed"].as<float>(), units.wind);
     }
     if (!current_json["wind_bearing"].isNull()) {
-        current.wind_direction_deg = current_json["wind_bearing"].as<float>();
+        current.wind_direction_deg = wind_bearing_to_degrees(current_json["wind_bearing"]);
     }
     if (!current_json["precipitation"].isNull()) {
         current.precipitation_mm = precip_to_mm(current_json["precipitation"].as<float>(), units.precip);
@@ -459,6 +516,36 @@ bool parse_weather_snapshot(const String &payload,
     if (!isfinite(current.today_low_c)) current.today_low_c = current.temperature_c;
 
     current.valid = isfinite(current.temperature_c) || current.condition != WeatherCondition::Unknown;
+    if (source_diag) {
+        source_diag->daily_count = daily_count;
+        source_diag->hourly_count = hourly_count;
+        if (!source_diag->valid) {
+            source_diag->valid = true;
+            source_diag->current_ok = current.valid;
+            source_diag->daily_ok = daily_count > 0;
+            source_diag->hourly_ok = hourly_count > 0;
+        }
+        if (!source_diag->current_daily_entity[0] || !source_diag->hourly_entity[0]) {
+            char current_daily_entity[96] = {};
+            char hourly_entity[96] = {};
+            web_manager_get_weather_sources(current_daily_entity, sizeof(current_daily_entity),
+                                            hourly_entity, sizeof(hourly_entity));
+            if (!source_diag->current_daily_entity[0]) {
+                snprintf(source_diag->current_daily_entity, sizeof(source_diag->current_daily_entity),
+                         "%s", current_daily_entity);
+            }
+            if (!source_diag->hourly_entity[0]) {
+                snprintf(source_diag->hourly_entity, sizeof(source_diag->hourly_entity),
+                         "%s", hourly_entity);
+            }
+        }
+        if (!source_diag->message[0]) {
+            snprintf(source_diag->message, sizeof(source_diag->message),
+                     "current=%s, daily=%u, hourly=%u",
+                     source_diag->current_ok ? "ok" : "unavailable",
+                     static_cast<unsigned>(daily_count), static_cast<unsigned>(hourly_count));
+        }
+    }
     return current.valid && (daily_count > 0 || hourly_count > 0);
 }
 
@@ -468,7 +555,8 @@ bool fetch_weather_snapshot(WeatherCurrent &current,
                             size_t &hourly_count,
                             WeatherDayForecast *daily,
                             size_t &daily_count,
-                            time_t &updated_epoch) {
+                            time_t &updated_epoch,
+                            WeatherSourceDiagnostics *source_diag) {
     static const char *kWeatherSnapshotPath =
         "/api/services/script/family_calendar_weather_snapshot?return_response";
 
@@ -493,7 +581,7 @@ bool fetch_weather_snapshot(WeatherCurrent &current,
         ESP_LOGW("FamilyCalendar", "[Weather] Snapshot HTTP %d", code);
         if (code == 400 || code == 422) {
             ESP_LOGW("FamilyCalendar",
-                     "[Weather] Verify the v2.2.1 family_calendar_weather_snapshot script is installed with current_daily_entity and hourly_entity fields");
+                     "[Weather] Verify the v2.2.2 family_calendar_weather_snapshot script is installed with current_daily_entity and hourly_entity fields");
         }
         return false;
     }
@@ -507,7 +595,8 @@ bool fetch_weather_snapshot(WeatherCurrent &current,
                                   hourly_count,
                                   daily,
                                   daily_count,
-                                  updated_epoch);
+                                  updated_epoch,
+                                  source_diag);
 }
 
 void log_next_refresh(uint32_t now_ms, uint32_t next_refresh_ms) {
@@ -563,6 +652,14 @@ uint32_t weather_service_last_attempt_ms() {
     last_attempt = g_last_attempt_ms;
     portEXIT_CRITICAL(&g_weather_mux);
     return last_attempt;
+}
+
+uint32_t weather_service_last_success_ms() {
+    uint32_t value = 0;
+    portENTER_CRITICAL(&g_weather_mux);
+    value = g_last_success_ms;
+    portEXIT_CRITICAL(&g_weather_mux);
+    return value;
 }
 
 bool weather_service_should_refresh(uint32_t now_ms) {
@@ -625,7 +722,7 @@ bool weather_service_request_refresh(bool force, const char *reason) {
 bool weather_service_worker_has_pending() {
     bool pending = false;
     portENTER_CRITICAL(&g_weather_mux);
-    pending = g_request_pending;
+    pending = g_request_pending || g_source_test_pending;
     portEXIT_CRITICAL(&g_weather_mux);
     return pending;
 }
@@ -633,7 +730,7 @@ bool weather_service_worker_has_pending() {
 bool weather_service_worker_busy() {
     bool busy = false;
     portENTER_CRITICAL(&g_weather_mux);
-    busy = g_request_pending || g_in_progress;
+    busy = g_request_pending || g_in_progress || g_source_test_pending || g_source_test_in_progress;
     portEXIT_CRITICAL(&g_weather_mux);
     return busy;
 }
@@ -651,7 +748,15 @@ bool weather_service_worker_fetch() {
 
     const uint32_t now_ms = millis();
     bool forced = false;
+    bool source_test = false;
     portENTER_CRITICAL(&g_weather_mux);
+    source_test = g_source_test_pending;
+    if (source_test && !g_in_progress) {
+        g_source_test_pending = false;
+        g_source_test_in_progress = true;
+        g_request_pending = true;
+        g_force_request_pending = true;
+    }
     forced = g_force_request_pending;
     portEXIT_CRITICAL(&g_weather_mux);
 
@@ -688,6 +793,7 @@ bool weather_service_worker_fetch() {
     size_t hourly_count = 0;
     size_t daily_count = 0;
     time_t updated_epoch = 0;
+    WeatherSourceDiagnostics source_diag = {};
 
     const uint32_t started_ms = millis();
     const bool snapshot_ok = fetch_weather_snapshot(current,
@@ -696,7 +802,8 @@ bool weather_service_worker_fetch() {
                                                     hourly_count,
                                                     daily,
                                                     daily_count,
-                                                    updated_epoch);
+                                                    updated_epoch,
+                                                    &source_diag);
     const uint32_t elapsed_ms = millis() - started_ms;
 
     if (!snapshot_ok) {
@@ -706,6 +813,19 @@ bool weather_service_worker_fetch() {
         portENTER_CRITICAL(&g_weather_mux);
         g_next_refresh_ms = retry_due_ms;
         g_in_progress = false;
+        if (g_source_test_in_progress) {
+            memset(&g_source_diagnostics, 0, sizeof(g_source_diagnostics));
+            g_source_diagnostics.valid = true;
+            g_source_diagnostics.tested_ms = millis();
+            g_source_diagnostics.latency_ms = elapsed_ms;
+            web_manager_get_weather_sources(g_source_diagnostics.current_daily_entity,
+                                            sizeof(g_source_diagnostics.current_daily_entity),
+                                            g_source_diagnostics.hourly_entity,
+                                            sizeof(g_source_diagnostics.hourly_entity));
+            snprintf(g_source_diagnostics.message, sizeof(g_source_diagnostics.message),
+                     "Hybrid weather request failed");
+            g_source_test_in_progress = false;
+        }
         snprintf(g_status, sizeof(g_status), "Weather snapshot fetch failed");
         portEXIT_CRITICAL(&g_weather_mux);
         log_next_refresh(now_ms, retry_due_ms);
@@ -728,6 +848,12 @@ bool weather_service_worker_fetch() {
     g_has_data = true;
     g_publish_pending = true;
     g_in_progress = false;
+    source_diag.tested_ms = millis();
+    source_diag.latency_ms = elapsed_ms;
+    source_diag.pending = false;
+    source_diag.in_progress = false;
+    g_source_diagnostics = source_diag;
+    g_source_test_in_progress = false;
     snprintf(g_status, sizeof(g_status), "Weather updated from HA snapshot");
     portEXIT_CRITICAL(&g_weather_mux);
 
@@ -737,6 +863,30 @@ bool weather_service_worker_fetch() {
              static_cast<unsigned>(hourly_count), static_cast<unsigned>(daily_count));
     log_next_refresh(now_ms, next_refresh_ms);
     return true;
+}
+
+bool weather_service_request_source_test() {
+    if (!weather_service_configured()) return false;
+    bool queued = false;
+    portENTER_CRITICAL(&g_weather_mux);
+    if (!g_source_test_pending && !g_source_test_in_progress) {
+        g_source_test_pending = true;
+        g_source_diagnostics.pending = true;
+        g_source_diagnostics.in_progress = false;
+        queued = true;
+    }
+    portEXIT_CRITICAL(&g_weather_mux);
+    if (queued && g_wake_callback) g_wake_callback();
+    return queued;
+}
+
+void weather_service_get_source_diagnostics(WeatherSourceDiagnostics &out) {
+    memset(&out, 0, sizeof(out));
+    portENTER_CRITICAL(&g_weather_mux);
+    out = g_source_diagnostics;
+    out.pending = g_source_test_pending;
+    out.in_progress = g_source_test_in_progress;
+    portEXIT_CRITICAL(&g_weather_mux);
 }
 
 bool weather_service_take_publish_pending() {

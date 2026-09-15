@@ -1,7 +1,7 @@
 #pragma once
 
 #define APP_NAME "Family Hub"
-#define APP_VERSION "2.2.1"
+#define APP_VERSION "2.2.2"
 
 /* JC8012P4A1C native panel is portrait; 90 degrees gives 1280x800 landscape. */
 #define APP_DISPLAY_ROTATION 90
@@ -49,6 +49,20 @@
 #endif
 #ifndef PERSON_4_NAME
 #define PERSON_4_NAME "Child 2"
+#endif
+
+/* Default family calendar colors.  Web-managed NVS values override these at boot. */
+#ifndef PERSON_1_COLOR
+#define PERSON_1_COLOR 0x22C55EUL
+#endif
+#ifndef PERSON_2_COLOR
+#define PERSON_2_COLOR 0x2596BEUL
+#endif
+#ifndef PERSON_3_COLOR
+#define PERSON_3_COLOR 0xF06292UL
+#endif
+#ifndef PERSON_4_COLOR
+#define PERSON_4_COLOR 0xBA68C8UL
 #endif
 
 #ifndef HA_CALENDAR_1

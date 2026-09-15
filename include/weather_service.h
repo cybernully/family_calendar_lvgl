@@ -76,6 +76,22 @@ struct WeatherSnapshot {
     size_t daily_count;
 };
 
+struct WeatherSourceDiagnostics {
+    bool valid;
+    bool pending;
+    bool in_progress;
+    bool current_ok;
+    bool daily_ok;
+    bool hourly_ok;
+    uint32_t tested_ms;
+    uint32_t latency_ms;
+    size_t daily_count;
+    size_t hourly_count;
+    char current_daily_entity[96];
+    char hourly_entity[96];
+    char message[160];
+};
+
 using WeatherWorkerWakeCallback = void (*)();
 
 void weather_service_begin();
@@ -85,6 +101,7 @@ bool weather_service_configured();
 bool weather_service_has_data();
 const char *weather_service_status();
 uint32_t weather_service_last_attempt_ms();
+uint32_t weather_service_last_success_ms();
 
 bool weather_service_request_refresh(bool force, const char *reason);
 bool weather_service_should_refresh(uint32_t now_ms);
@@ -92,6 +109,10 @@ bool weather_service_worker_has_pending();
 bool weather_service_worker_busy();
 bool weather_service_worker_fetch();
 bool weather_service_take_publish_pending();
+
+/* Runs through the same shared HA worker as normal weather fetches. */
+bool weather_service_request_source_test();
+void weather_service_get_source_diagnostics(WeatherSourceDiagnostics &out);
 
 void weather_service_get_snapshot(WeatherSnapshot &out);
 bool weather_service_get_day_forecast(time_t local_time, WeatherDayForecast &out);

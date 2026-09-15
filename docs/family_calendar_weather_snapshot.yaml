@@ -1,6 +1,6 @@
 family_calendar_weather_snapshot:
   alias: Family Calendar Weather Snapshot
-  description: Hybrid weather snapshot for Family Hub 2.2.1+
+  description: Hybrid weather snapshot for Family Hub 2.2.2+
   mode: single
   fields:
     current_daily_entity:
@@ -53,6 +53,17 @@ family_calendar_weather_snapshot:
         result:
           current_daily_entity: "{{ current_source }}"
           hourly_entity: "{{ hourly_source }}"
+          sources:
+            current_daily_entity: "{{ current_source }}"
+            hourly_entity: "{{ hourly_source }}"
+            current_ok: "{{ states(current_source) not in ['unknown', 'unavailable', 'none', ''] }}"
+            daily_ok: "{{ daily_forecast | count > 0 }}"
+            hourly_ok: "{{ hourly_forecast | count > 0 }}"
+            daily_count: "{{ daily_forecast | count }}"
+            hourly_count: "{{ hourly_forecast | count }}"
+            message: >-
+              current={{ 'ok' if states(current_source) not in ['unknown', 'unavailable', 'none', ''] else 'unavailable' }},
+              daily={{ daily_forecast | count }}, hourly={{ hourly_forecast | count }}
           current:
             condition: "{{ states(current_source) }}"
             last_updated: "{{ now().isoformat() }}"

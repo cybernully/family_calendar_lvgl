@@ -11,6 +11,7 @@
 #include "home_assistant.h"
 #include "weather_service.h"
 #include "web_manager.h"
+#include "runtime_config.h"
 
 void setup() {
     Serial0.begin(115200);
@@ -24,6 +25,7 @@ void setup() {
 
     board_set_backlight(APP_DEFAULT_BACKLIGHT);
     time_service_begin();
+    runtime_config_begin();
     calendar_cache_begin();
     calendar_model_load_demo();
     chore_service_begin();
